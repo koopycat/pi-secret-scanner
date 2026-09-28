@@ -65,10 +65,11 @@ const SAFE_PATTERNS = [
 	/^\/(?:[A-Za-z0-9._\-]+\/)*[A-Za-z0-9._\-]*$/,
 	/^~\//,
 	/^\.\.?\//,
-	// Relative multi-segment filesystem paths (project/src/module, dist/bundle.js).
-	// Requires ≥2 separators and forbids `+`/`=` so slashed base64 secrets with
-	// padding or plus signs keep being detected.
-	/^[A-Za-z0-9._\-]+(?:\/[A-Za-z0-9._\-]+){2,}$/,
+	// Relative filesystem and repository paths (owner/repo, project/src/module).
+	// A slash-delimited value without base64-only `+`/`=` characters is public
+	// locator data, not an opaque secret. This also covers GitHub remotes,
+	// plugin/rule IDs, GitHub Action slugs, and stack-trace module paths.
+	/^[A-Za-z0-9._\-]+(?:\/[A-Za-z0-9._\-]+)+$/,
 ];
 
 function isSafe(candidate: string): boolean {
@@ -163,6 +164,13 @@ function isContextuallySafe(candidate: string, text: string, start: number, end:
 	// Check every assignment before the candidate so nested syntax such as
 	// `token=sha256:<value>` cannot disguise a credential as a public digest.
 	if (hasCredentialAssignment(before)) return false;
+
+	// Package-manager Subresource Integrity hashes are public verification data.
+	// Keep this below the credential guard so `token=sha512-...` remains detected.
+	// The second condition also suppresses structured sub-candidates extracted
+	// after `/` inside the base64 digest.
+	if (/^sha(?:256|384|512)-[A-Za-z0-9+/]+={0,2}$/.test(candidate) && key === "integrity") return true;
+	if (/\bintegrity\s*[=:]\s*["']?sha(?:256|384|512)-[A-Za-z0-9+/=]*$/i.test(before)) return true;
 
 	// Canonical lowercase Git object IDs under explicit public metadata keys.
 	if (key && isGitOidForKey(candidate, key)) return true;

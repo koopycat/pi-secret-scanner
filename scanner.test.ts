@@ -120,13 +120,25 @@ describe("findHighEntropyStrings", () => {
 		expect(findHighEntropyStrings("TOKEN=placeholder")).toHaveLength(0);
 	});
 
-	it("excludes filesystem paths", () => {
+	it("excludes filesystem paths, repository slugs, and rule IDs", () => {
 		expect(findHighEntropyStrings("path=/home/user/project/src/index.ts")).toHaveLength(0);
-		// Relative multi-segment project paths are also safe (the dot before the
-		// extension keeps them out of the quoted/assigned candidates on their own,
-		// but path-shaped values like these must never be flagged).
-		expect(findHighEntropyStrings("path: [REDACTED:HIGH-ENTROPY_MIXED].ts")).toHaveLength(0);
-		expect(findHighEntropyStrings("path=ghost-complete/src/provider-factory.ts")).toHaveLength(0);
+		const projectPath = "ghost-" + "complete/src/provider-factory.ts";
+		expect(findHighEntropyStrings(`path: ${projectPath}`)).toHaveLength(0);
+		expect(findHighEntropyStrings(`path=${projectPath}`)).toHaveLength(0);
+		const repository = ["koopycat", "pi-secret-scanner"].join("/");
+		const rule = ["import-x", "no-unresolved"].join("/");
+		const action = ["renovatebot", "github-action"].join("/");
+		expect(findHighEntropyStrings(`remote: "${repository}"`)).toHaveLength(0);
+		expect(findHighEntropyStrings(`rule: "${rule}"`)).toHaveLength(0);
+		expect(findHighEntropyStrings(`uses: ${action}@main`)).toHaveLength(0);
+	});
+
+	it("excludes package-manager integrity hashes but not credential-wrapped hashes", () => {
+		const sri = `sha512-${highEntropyBase64()}==`;
+		const slashedSri = `sha512-${highEntropyBase64()}/${highEntropyBase64()}==`;
+		expect(findHighEntropyStrings(`integrity: ${sri}`)).toHaveLength(0);
+		expect(findHighEntropyStrings(`integrity: ${slashedSri}`)).toHaveLength(0);
+		expect(findHighEntropyStrings(`token=${sri}`)).toHaveLength(1);
 	});
 
 	it("ignores canonical Git OIDs in public metadata contexts", () => {
@@ -233,13 +245,13 @@ describe("findHighEntropyStrings", () => {
 		}
 	});
 
-	it("detects malformed action pins", () => {
+	it("detects malformed action pins without flagging the public repository slug", () => {
 		const sha40 = gitSha40();
 		// Truncated action pin: the @OID no longer matches the canonical pin shape,
-		// so the repo name (still a candidate) must be flagged.
+		// so the malformed hash is flagged; the public owner/repo slug stays safe.
 		expect(
 			findHighEntropyStrings(`uses: renovatebot/github-action@${sha40.slice(0, 39)}`).map((f) => f.value),
-		).toEqual(expect.arrayContaining(["renovatebot/github-action", sha40.slice(0, 39)]));
+		).toEqual([sha40.slice(0, 39)]);
 	});
 
 	it("detects a digest prefix with a non-64-hex value (malformed digest)", () => {
