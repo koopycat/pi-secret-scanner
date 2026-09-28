@@ -122,6 +122,11 @@ describe("findHighEntropyStrings", () => {
 
 	it("excludes filesystem paths", () => {
 		expect(findHighEntropyStrings("path=/home/user/project/src/index.ts")).toHaveLength(0);
+		// Relative multi-segment project paths are also safe (the dot before the
+		// extension keeps them out of the quoted/assigned candidates on their own,
+		// but path-shaped values like these must never be flagged).
+		expect(findHighEntropyStrings("path: [REDACTED:HIGH-ENTROPY_MIXED].ts")).toHaveLength(0);
+		expect(findHighEntropyStrings("path=ghost-complete/src/provider-factory.ts")).toHaveLength(0);
 	});
 
 	it("ignores canonical Git OIDs in public metadata contexts", () => {
@@ -267,7 +272,13 @@ describe("SECRET_PATTERNS", () => {
 	function mustNotDetect(name: string, text: string) {
 		const p = findPat(name);
 		p.regex.lastIndex = 0;
-		expect(p.regex.test(text), `"${name}" should NOT detect "${text}"`).toBe(false);
+		const match = p.regex.exec(text);
+		// A match that `rejectValue` suppresses (language-aware FP guard) counts as
+		// not detected.
+		const rejected =
+			match !== null &&
+			p.rejectValue?.(p.secretGroup === undefined ? match[0] : (match[p.secretGroup] ?? "")) === true;
+		expect(!match || rejected, `"${name}" should NOT detect "${text}"`).toBe(true);
 	}
 
 	it("detects OpenAI API key", () => {
@@ -311,6 +322,21 @@ describe("SECRET_PATTERNS", () => {
 		mustNotDetect("Generic Password Assignment", `password=\${ENV_VAR}`);
 	});
 
+	it("does NOT false-positive on code references", () => {
+		// Regression: these are real lines from provider code. Redacting them
+		// destroyed the code the agent was supposed to read and edit.
+		mustNotDetect(
+			"Generic Password Assignment",
+			'const[REDACTED:GENERIC_PASSWORD_ASSIGNMENT] ?? process.env.MISTRAL_API_KEY ?? "";',
+		);
+		mustNotDetect("Generic Password Assignment", "apiKey: kiloToken,");
+		mustNotDetect("Generic Password Assignment", "credential: kiloToken,");
+		mustNotDetect(
+			"Generic Password Assignment",
+			'const credential = opts?.credential ?? process.env.PI_GHOST_API_KEY ?? "ollama";',
+		);
+	});
+
 	it("still detects literal generic credential assignments", () => {
 		mustDetect("Generic Password Assignment", "PASSWORD=correct-horse-battery-staple");
 		mustDetect("Generic Password Assignment", "apiKey: literal-api-key-value");
@@ -337,6 +363,14 @@ describe("scanText", () => {
 		expect(result.redacted).toBe("token=[REDACTED:GITHUB_PERSONAL_ACCESS_TOKEN_(CLASSIC)]");
 		expect(result.redactions).toHaveLength(1);
 		expect(result.redactions[0]?.type).toBe("GitHub Personal Access Token (classic)");
+	});
+
+	it("redacts only the value of a generic assignment, keeping surrounding code", () => {
+		const value = "live-" + "secret-" + "value-9f8e7d";
+		const result = scanText(`const apiKey = "${value}";`, { useEntropy: false });
+		expect(result.findings[0]?.type).toBe("Generic Password Assignment");
+		expect(result.redacted).toBe(`const apiKey = "[REDACTED:GENERIC_PASSWORD_ASSIGNMENT]";`);
+		expect(result.redacted).not.toContain(value);
 	});
 
 	it("redacts entropy-only findings", () => {
@@ -437,12 +471,12 @@ describe("scanText", () => {
 		const sha64 = gitSha64();
 		const token = scanText(`token=${sha40}`);
 		expect(token.findings.map((f) => f.type)).toContain("Generic Password Assignment");
-		// The generic pattern's match spans the whole `key=value`, so the full
-		// assignment (prefix included) is replaced by the placeholder.
-		expect(token.redacted).toBe("[REDACTED:GENERIC_PASSWORD_ASSIGNMENT]");
+		// secretGroup 1: only the value is replaced, the assignment prefix stays
+		// visible so the agent can still read the surrounding code.
+		expect(token.redacted).toBe("token=[REDACTED:GENERIC_PASSWORD_ASSIGNMENT]");
 
 		const secret = scanText(`secret=${sha64}`);
-		expect(secret.redacted).toBe("[REDACTED:GENERIC_PASSWORD_ASSIGNMENT]");
+		expect(secret.redacted).toBe("secret=[REDACTED:GENERIC_PASSWORD_ASSIGNMENT]");
 		expect(secret.redacted).not.toContain(sha64.slice(0, 8));
 	});
 
@@ -503,7 +537,27 @@ describe("scanObject", () => {
 		const unsafe = scanObject({ token: `token=${sha64}` });
 		expect(unsafe.hasFindings).toBe(true);
 		const redacted = unsafe.redactedObject as Record<string, string>;
-		expect(redacted.token).toBe("[REDACTED:GENERIC_PASSWORD_ASSIGNMENT]");
+		expect(redacted.token).toBe("token=[REDACTED:GENERIC_PASSWORD_ASSIGNMENT]");
+	});
+
+	it("skips string values under known path keys (edit-tool paths are not secrets)", () => {
+		const obj = {
+			path: "[REDACTED:HIGH-ENTROPY_MIXED].ts",
+			filePath: "/Users/vk/src/inkubator/project/src/provider-factory.ts",
+			workingDir: "/tmp/build-cache/a1b2c3d4e5f6",
+			new_string: "safe",
+		};
+		const result = scanObject(obj);
+		expect(result.hasFindings).toBe(false);
+		expect(result.redactedObject).toEqual(obj);
+	});
+
+	it("still scans values under credential-bearing keys", () => {
+		// `token` keys are never skipped like `path` keys are, even when the value
+		// itself looks digest-like.
+		const sha64 = gitSha64();
+		const obj = { token: `token=${sha64}` };
+		expect(scanObject(obj).hasFindings).toBe(true);
 	});
 
 	it("clean objects return hasFindings=false", () => {

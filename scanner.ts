@@ -68,6 +68,8 @@ function isWhitelisted(value: string, whitelist?: Set<string>, regexes?: RegExp[
 
 // ── Text scanning ─────────────────────────────────────────────────────────────
 
+type ExecWithIndices = RegExpExecArray & { indices?: Array<[number, number] | undefined> };
+
 export function scanText(text: string, options?: ScanOptions): ScanResult {
 	const patterns = options?.patterns ?? SECRET_PATTERNS;
 	const disabled = options?.disabledRules;
@@ -80,19 +82,33 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 	for (const pattern of patterns) {
 		if (disabled?.has(pattern.name)) continue;
 
-		pattern.regex.lastIndex = 0;
+		// Clone with the `d` flag when the pattern targets a capture group so the
+		// group's offset is exact even if the value recurs inside the assignment
+		// prefix (e.g. `token=token12345678`).
+		const regex =
+			pattern.secretGroup === undefined
+				? pattern.regex
+				: new RegExp(pattern.regex.source, `${pattern.regex.flags}d`);
+
+		regex.lastIndex = 0;
 		let match: RegExpExecArray | null;
-		while ((match = pattern.regex.exec(text)) !== null) {
+		while ((match = regex.exec(text)) !== null) {
 			const group = pattern.secretGroup;
 			const value = group === undefined ? match[0] : match[group];
 			if (!value) {
-				if (match[0].length === 0) pattern.regex.lastIndex++;
+				if (match[0].length === 0) regex.lastIndex++;
 				continue;
 			}
+			if (pattern.rejectValue?.(value)) continue;
 
-			const offsetInMatch = group === undefined ? 0 : match[0].indexOf(value);
-			if (offsetInMatch < 0) continue;
-			const start = match.index + offsetInMatch;
+			let start: number;
+			if (group === undefined) {
+				start = match.index;
+			} else {
+				const indices = (match as ExecWithIndices).indices?.[group];
+				if (!indices) continue;
+				start = indices[0];
+			}
 			const end = start + value.length;
 
 			if (value.startsWith("[REDACTED:") || match[0].includes("[REDACTED:")) continue;
@@ -157,6 +173,34 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 
 // ── Object scanning (for provider payloads) ───────────────────────────────────
 
+/**
+ * Object keys whose string values are file-system paths, never secrets.
+ * Edit-tool payloads carry project paths here; scanning them corrupted the
+ * path in-flight (the LLM received `[REDACTED:HIGH-ENTROPY_MIXED].ts` and the
+ * edit failed with ENOENT). Credential-bearing keys (token, secret, …) are
+ * deliberately NOT in this list -- their values always stay scannable.
+ */
+const PATH_KEYS = new Set([
+	"path",
+	"file_path",
+	"filepath",
+	"abs_path",
+	"absolute_path",
+	"cwd",
+	"dir",
+	"directory",
+	"folder",
+	"workdir",
+	"working_dir",
+]);
+
+function normalizeKey(key: string): string {
+	return key
+		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+		.toLowerCase();
+}
+
 export interface ObjectScanResult {
 	findings: Finding[];
 	/** Findings whose values were actually replaced. */
@@ -190,7 +234,9 @@ export function scanObject(obj: unknown, options?: ScanOptions): ObjectScanResul
 		if (node !== null && typeof node === "object") {
 			const out: Record<string, unknown> = {};
 			for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-				out[key] = walk(value);
+				// String values under known path keys are file-system paths, not
+				// secrets; pass them through untouched. Everything else is scanned.
+				out[key] = typeof value === "string" && PATH_KEYS.has(normalizeKey(key)) ? value : walk(value);
 			}
 			return out;
 		}

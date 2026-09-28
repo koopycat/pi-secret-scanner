@@ -28,7 +28,8 @@
 		"lint:fix": "eslint --fix .",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
-		"check": "prettier --check . && eslint . && tsc --noEmit && vitest --run"
+		"check": "prettier --check . && eslint . && tsc --noEmit && vitest --run",
+		"smoke": "node smoke/run.mjs"
 	},
 	"dependencies": {
 		"smol-toml": "^1.7.0"
@@ -37,6 +38,7 @@
 		"@earendil-works/pi-coding-agent": ">=0.74.0"
 	},
 	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.87.1",
 		"@types/node": "^26.0.0",
 		"eslint": "^10.6.0",
 		"eslint-config-prettier": "^10.1.8",

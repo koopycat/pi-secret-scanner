@@ -10,6 +10,7 @@ the machine. Extracted from the `pi_extensions` monorepo; this repo is the singl
 pnpm install        # Install dependencies (pnpm only, never npm/yarn)
 pnpm check          # Prettier + ESLint (zero warnings) + typecheck + tests
 pnpm test           # Run vitest
+pnpm smoke          # End-to-end: real pi session + deterministic fake provider
 pnpm typecheck      # tsc --noEmit
 pnpm lint           # ESLint — must pass with zero warnings
 pnpm format         # Prettier write
@@ -17,7 +18,23 @@ pnpm format:check   # Prettier dry-run
 ```
 
 If `pnpm install` exits with code 1 about ignored build scripts, run
-`pnpm approve-builds esbuild unrs-resolver` then `pnpm install` again.
+`pnpm approve-builds esbuild unrs-resolver koffi` then `pnpm install` again.
+
+## CI (`.github/workflows/ci.yml`)
+
+- `check` job — `pnpm check` on Node 22/24.
+- `smoke` job — runs `pnpm check` + `pnpm smoke` against **two pi versions**:
+  the minimum supported (`0.74.0`, matches the peerDependency range) and
+  `latest`. A scheduled weekly run catches extension-API breakage in new pi
+  releases before users hit it.
+
+The smoke test (`smoke/run.mjs`) boots a real pi session in JSON mode with the
+extension loaded and a local OpenAI-compatible fake provider
+(`smoke/fake-provider.mjs`) that scripts a two-turn conversation (read tool
+call → final text). It asserts the extension loads cleanly and that both
+redaction hooks (`before_provider_request`, `tool_result`) actually redact
+in-flight, and that no secret reaches the provider. No LLM API key required.
+pi is installed as a devDependency so everything is self-contained.
 
 ## Package layout
 

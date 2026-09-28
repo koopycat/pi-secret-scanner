@@ -12,6 +12,8 @@ export interface SecretPattern {
 	regex: RegExp;
 	/** Capture group containing only the secret. Omit to redact the full match. */
 	secretGroup?: number;
+	/** Return true to skip this match -- used for language-aware FP suppression. */
+	rejectValue?: (value: string) => boolean;
 	confidence: "high" | "medium";
 }
 
@@ -182,10 +184,27 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 
 	// ── Generic password assignments ──────────────────────────────────────────
 	// Catches: PASSWORD=abc123, "password": "s3cr3t", etc.
+	//
+	// secretGroup 1: only the value is redacted; the assignment itself and all
+	// surrounding code stay visible to the agent.
+	//
+	// Values shaped like source code are rejected via `rejectValue` (kept out of
+	// the regex because the `i` flag folds [A-Z] onto lowercase, making case
+	// detection inside the pattern impossible):
+	//   - dotted / optional-chained references (process.env.FOO, opts?.apiKey)
+	//   - bare camelCase/PascalCase identifiers (apiKey: kiloToken)
+	// All-lowercase identifier values (password=hunter2) and hyphenated literals
+	// (apiKey: literal-api-key-value) are still detected.
 	{
 		name: "Generic Password Assignment",
-		regex: /(?:^|[\s,;{[(])(?:password|passwd|pwd|secret|token|api[_\-.]?key|auth[_\-.]?key|auth[_\-.]?token|access[_\-.]?token|private[_\-.]?key)\s*[=:]\s*["']?(?!\s*(?:true|false|null|undefined|\$\{|\{\{|<[A-Z_]+>|your[_\-]|xxx|123|test|example|placeholder|changeme|replace))[^\s"',;\]})]{8,}["']?/gim,
+		regex: /(?:^|[\s,;{[(])(?:password|passwd|pwd|secret|token|api[_\-.]?key|auth[_\-.]?key|auth[_\-.]?token|access[_\-.]?token|private[_\-.]?key)\s*[=:]\s*["']?(?!\s*(?:true|false|null|undefined|\$\{|\{\{|<[A-Z_]+>|your[_\-]|xxx|123|test|example|placeholder|changeme|replace))([^\s"',;\]})]{8,})["']?/gim,
+		secretGroup: 1,
 		confidence: "medium",
+		rejectValue: (value) =>
+			// Dotted / optional-chained references: process.env.FOO, opts?.apiKey.
+			/^[A-Za-z_$][A-Za-z0-9_$]*(?:\?\.[A-Za-z_$][A-Za-z0-9_$]*|\.[A-Za-z_$][A-Za-z0-9_$]*)+$/.test(value) ||
+			// Bare camelCase/PascalCase identifiers: local variables, object props.
+			/^[A-Za-z_$][A-Za-z0-9_$]*[A-Z][A-Za-z0-9_$]*$/.test(value),
 	},
 
 	// ── URLs with embedded credentials ────────────────────────────────────────

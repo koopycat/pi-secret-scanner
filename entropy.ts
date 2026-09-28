@@ -65,6 +65,10 @@ const SAFE_PATTERNS = [
 	/^\/(?:[A-Za-z0-9._\-]+\/)*[A-Za-z0-9._\-]*$/,
 	/^~\//,
 	/^\.\.?\//,
+	// Relative multi-segment filesystem paths (project/src/module, dist/bundle.js).
+	// Requires ≥2 separators and forbids `+`/`=` so slashed base64 secrets with
+	// padding or plus signs keep being detected.
+	/^[A-Za-z0-9._\-]+(?:\/[A-Za-z0-9._\-]+){2,}$/,
 ];
 
 function isSafe(candidate: string): boolean {
