@@ -54,6 +54,30 @@ function highEntropyBase64(): string {
 	return "aB3dE5fG7hI9jK1lM2nO4pQ6rS8tU0vW";
 }
 
+function encodeBase64(value: string): string {
+	return Buffer.from(value).toString("base64");
+}
+
+function sourceMapBase64(): string {
+	return encodeBase64(
+		JSON.stringify({ version: 3, sources: ["src/index.ts"], names: [], mappings: "AAAA,SAASA,IAAI,CAAC" }),
+	);
+}
+
+function pngBase64(): string {
+	return Buffer.from([
+		0x89,
+		0x50,
+		0x4e,
+		0x47,
+		0x0d,
+		0x0a,
+		0x1a,
+		0x0a,
+		...Array.from({ length: 48 }, (_, index) => (index * 37) % 256),
+	]).toString("base64");
+}
+
 // Synthetic Git SHA-1 (40 lowercase hex) — not a real OID, assembled to keep
 // the source free of anything that looks like a live identifier.
 function gitSha40(): string {
@@ -385,20 +409,190 @@ describe("scanText", () => {
 		expect(result.redacted).not.toContain(value);
 	});
 
-	it("redacts entropy-only findings", () => {
+	it("reports an ambiguous Base64 candidate without redacting it", () => {
 		const value = highEntropyBase64();
-		const result = scanText(`UNKNOWN=${value}`, { patterns: [], useEntropy: true });
-		expect(result.findings).toHaveLength(1);
-		expect(result.redactions).toEqual(result.findings);
-		expect(result.redacted).not.toContain(value);
-		expect(result.redacted).toContain("[REDACTED:HIGH-ENTROPY_BASE64]");
+		const text = `UNKNOWN=${value}`;
+		const result = scanText(text, { patterns: [], useEntropy: true });
+		expect(result.findings).toEqual([
+			expect.objectContaining({
+				type: "High-Entropy BASE64",
+				action: "report",
+				context: "ambiguous",
+				encoding: "base64",
+				decodedKind: "non-printable",
+			}),
+		]);
+		expect(result.redactions).toEqual([]);
+		expect(result.redacted).toBe(text);
 	});
 
-	it("redacts every occurrence of a repeated entropy-only value", () => {
+	it("reports every occurrence of repeated ambiguous Base64 without redacting", () => {
 		const value = highEntropyBase64();
-		const result = scanText(`FIRST=${value}\nSECOND=${value}`, { patterns: [], useEntropy: true });
+		const text = `FIRST=${value}\nSECOND=${value}`;
+		const result = scanText(text, { patterns: [], useEntropy: true });
 		expect(result.findings).toHaveLength(2);
-		expect(result.redacted).not.toContain(value);
+		expect(result.redactions).toHaveLength(0);
+		expect(result.redacted).toBe(text);
+	});
+
+	it("does not redact benign Base64 source maps, quoted prose, or recognized binary files", () => {
+		const prose = encodeBase64("The quick brown fox jumps over the lazy dog.");
+		const sourceMap = sourceMapBase64();
+		const png = pngBase64();
+		const text = `sourceMap=${sourceMap}\nconst fixture = "${prose}";\nimage=${png}`;
+		const result = scanText(text, { patterns: [], useEntropy: true });
+
+		expect(result.redacted).toBe(text);
+		expect(result.redactions).toHaveLength(0);
+		expect(result.findings).toHaveLength(3);
+		expect(result.findings.map((finding) => finding.action)).toEqual(["report", "report", "report"]);
+		expect(result.findings.map((finding) => finding.decodedKind)).toEqual(["text", "text", "binary"]);
+	});
+
+	it("does not auto-redact standalone quoted or ordinary assignment Base64", () => {
+		const value = encodeBase64("ordinary configuration fixture with enough varied printable text");
+		for (const text of [`"${value}"`, `payload=${value}`]) {
+			const result = scanText(text, { patterns: [], useEntropy: true });
+			expect(result.findings).toHaveLength(1);
+			expect(result.redactions).toHaveLength(0);
+			expect(result.redacted).toBe(text);
+		}
+	});
+
+	it("redacts Base64 in credential assignments regardless of decoded content or quoted key syntax", () => {
+		const variants = [
+			{ text: `token=${highEntropyBase64()}`, encoding: "base64" },
+			{ text: `api_key=${highEntropyBase64()}-_Xy`, encoding: "base64url" },
+			{
+				text: `token=${encodeBase64("ordinary printable text that is still a token value")}`,
+				encoding: "base64",
+			},
+			{
+				text: `{"token":"${encodeBase64("ordinary printable text that is still a token value")}"}`,
+				encoding: "base64",
+			},
+		];
+		for (const { text, encoding } of variants) {
+			const result = scanText(text, { patterns: [], useEntropy: true });
+			expect(result.findings).toHaveLength(1);
+			expect(result.redactions).toHaveLength(1);
+			expect(result.findings[0]).toMatchObject({
+				action: "redact",
+				context: "credential-assignment",
+				encoding,
+			});
+			expect(result.redacted).not.toContain(result.findings[0]?.value ?? "missing");
+		}
+	});
+
+	it("redacts common key-management credential assignments", () => {
+		const value = highEntropyBase64();
+		for (const key of ["AUTH", "ACCESS_KEY", "ENCRYPTION_KEY", "MASTER_KEY", "SIGNING_KEY"]) {
+			const result = scanText(`${key}=${value}`, { patterns: [], useEntropy: true });
+			expect(result.findings[0]).toMatchObject({ action: "redact", context: "credential-assignment" });
+			expect(result.redactions).toHaveLength(1);
+			expect(result.redacted).toBe(`${key}=[REDACTED:HIGH-ENTROPY_BASE64]`);
+		}
+	});
+
+	it("redacts a malformed opaque Base64-shaped value in immediate credential context", () => {
+		const value = `${highEntropyBase64()}===`;
+		const result = scanText(`token=${value}`, { patterns: [], useEntropy: true });
+		expect(result.findings[0]).toMatchObject({
+			action: "redact",
+			context: "credential-assignment",
+			decodedKind: "invalid",
+		});
+		expect(result.redacted).toBe("token=[REDACTED:HIGH-ENTROPY_BASE64]");
+	});
+
+	it("keeps credential context for multiline assignments", () => {
+		const value = highEntropyBase64();
+		const text = `client_secret:\n  ${value}`;
+		const result = scanText(text, { patterns: [], useEntropy: true });
+		expect(result.findings[0]).toMatchObject({ action: "redact", context: "credential-assignment" });
+		expect(result.redacted).toBe("client_secret:\n  [REDACTED:HIGH-ENTROPY_BASE64]");
+	});
+
+	it("does not let a safe path-like shape override credential context", () => {
+		const value = "aB3dE5fG7hI9jK1lM2nO/4pQ6rS8tU0vW";
+		const result = scanText(`token=${value}`, { patterns: [], useEntropy: true });
+		expect(result.findings[0]).toMatchObject({ action: "redact", context: "credential-assignment" });
+		expect(result.redacted).toBe("token=[REDACTED:HIGH-ENTROPY_BASE64]");
+	});
+
+	it("redacts canonical Base64 in Basic authorization context", () => {
+		const value = encodeBase64("admin:correct-horse-battery-staple");
+		const result = scanText(`Authorization: Basic ${value}`, { patterns: [], useEntropy: true });
+		expect(result.findings).toHaveLength(1);
+		expect(result.redactions).toHaveLength(1);
+		expect(result.findings[0]).toMatchObject({
+			action: "redact",
+			context: "basic-auth",
+			decodedKind: "text",
+		});
+		expect(result.redacted).toBe("Authorization: Basic [REDACTED:HIGH-ENTROPY_BASE64]");
+	});
+
+	it("redacts quoted Basic authorization credentials", () => {
+		const value = encodeBase64("admin:correct-horse-battery-staple");
+		const result = scanText(`Authorization: Basic "${value}"`, { patterns: [], useEntropy: true });
+		expect(result.findings[0]).toMatchObject({ action: "redact", context: "basic-auth" });
+		expect(result.redacted).toBe('Authorization: Basic "[REDACTED:HIGH-ENTROPY_BASE64]"');
+	});
+
+	it("does not extend Basic authorization context across a newline", () => {
+		const value = highEntropyBase64();
+		const text = `Authorization: Basic\n"${value}"`;
+		const result = scanText(text, { patterns: [], useEntropy: true });
+		expect(result.findings).toEqual([expect.objectContaining({ action: "report", context: "ambiguous" })]);
+		expect(result.redactions).toHaveLength(0);
+		expect(result.redacted).toBe(text);
+	});
+
+	it("redacts the outer Base64 candidate when decoded text contains a credential assignment", () => {
+		const value = encodeBase64("token=correct-horse-battery-staple-9f8e7d");
+		const text = `payload=${value}`;
+		const result = scanText(text, { patterns: [], useEntropy: true });
+		expect(result.findings).toHaveLength(1);
+		expect(result.redactions).toHaveLength(1);
+		expect(result.findings[0]).toMatchObject({
+			action: "redact",
+			context: "encoded-credential",
+			decodedKind: "credential",
+		});
+		expect(result.redacted).toBe("payload=[REDACTED:HIGH-ENTROPY_BASE64]");
+	});
+
+	it("inspects bounded ends of large decoded Base64 content for credentials", () => {
+		const decoded = `${"ordinary text ".repeat(1500)}\ntoken=correct-horse-battery-staple-9f8e7d`;
+		const value = encodeBase64(decoded);
+		const result = scanText(`payload=${value}`, { patterns: [], useEntropy: true });
+		expect(result.findings[0]).toMatchObject({ action: "redact", context: "encoded-credential" });
+		expect(result.redactions).toHaveLength(1);
+	});
+
+	it("redacts the outer Base64 candidate when decoded text contains a named provider secret or private key", () => {
+		const privateKey = ["-----BEGIN PRIVATE KEY-----", "abc1234567890", "-----END PRIVATE KEY-----"].join("\n");
+		for (const decoded of [githubPat(), privateKey]) {
+			const value = encodeBase64(decoded);
+			const result = scanText(`payload=${value}`, { patterns: [], useEntropy: true });
+			expect(result.redactions).toHaveLength(1);
+			expect(result.findings[0]).toMatchObject({
+				action: "redact",
+				context: "encoded-credential",
+				decodedKind: "credential",
+			});
+		}
+	});
+
+	it("preserves provider regex findings even when the value is also a high-entropy Base64 candidate", () => {
+		const value = `${highEntropyBase64()}XyZ9QwRt`;
+		const result = scanText(`AWS_SECRET_ACCESS_KEY=${value}`);
+		expect(result.findings).toHaveLength(1);
+		expect(result.redactions).toHaveLength(1);
+		expect(result.findings[0]).toMatchObject({ source: "regex", type: "AWS Secret Access Key" });
+		expect(result.redacted).toBe("AWS_SECRET_ACCESS_KEY=[REDACTED:AWS_SECRET_ACCESS_KEY]");
 	});
 
 	it("uses the full AWS Access Key ID for redaction and exact whitelisting", () => {

@@ -310,20 +310,19 @@ export default function (pi: ExtensionAPI) {
 		stats.findingsTotal += result.findings.length;
 		mergeTypeCounts(stats.byType, countByType(result.findings));
 
-		const summary = formatFindings(result.findings);
-		const count = result.findings.length;
-		const label = count === 1 ? "secret" : "secrets";
-
 		updateStatus(ctx);
 
-		if (mode === "warn") {
+		if (mode === "warn" || result.redactions.length === 0) {
 			return;
 		}
 
 		if (mode === "confirm" && ctx.hasUI) {
+			const redactionSummary = formatFindings(result.redactions);
+			const redactionCount = result.redactions.length;
+			const redactionLabel = redactionCount === 1 ? "secret" : "secrets";
 			const ok = await ctx.ui.confirm(
-				`🔐 Secret Scanner: ${count} potential ${label} detected`,
-				`Redact before sending to LLM?\n\n${summary}\n\nChoose "Yes" to redact, "No" to send as-is.`,
+				`🔐 Secret Scanner: ${redactionCount} potential ${redactionLabel} detected`,
+				`Redact before sending to LLM?\n\n${redactionSummary}\n\nChoose "Yes" to redact, "No" to send as-is.`,
 			);
 			if (!ok) {
 				return;
@@ -372,9 +371,9 @@ export default function (pi: ExtensionAPI) {
 
 				if (mode === "warn") {
 					newContent.push(item);
-				} else if (mode === "confirm" && ctx.hasUI) {
-					const summary = formatFindings(result.findings);
-					const count = result.findings.length;
+				} else if (mode === "confirm" && ctx.hasUI && result.redactions.length > 0) {
+					const summary = formatFindings(result.redactions);
+					const count = result.redactions.length;
 					const label = count === 1 ? "secret" : "secrets";
 					const ok = await ctx.ui.confirm(
 						`🔐 Secret Scanner: ${count} potential ${label} in file`,

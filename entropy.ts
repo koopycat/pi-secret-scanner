@@ -12,12 +12,27 @@
  *   - Require minimum candidate length to reduce noise.
  */
 
+import { SECRET_PATTERNS } from "./patterns.ts";
+
+export type EntropyAction = "redact" | "report";
+export type EntropyContext = "credential-assignment" | "basic-auth" | "encoded-credential" | "ambiguous";
+export type Base64Encoding = "base64" | "base64url";
+export type DecodedKind = "credential" | "text" | "binary" | "non-printable" | "invalid";
+
 export interface EntropyFinding {
 	value: string;
 	start: number;
 	end: number;
 	entropy: number;
 	charSet: "hex" | "base64" | "mixed";
+	/** Whether this candidate is safe to replace automatically or only report. */
+	action: EntropyAction;
+	/** Why the candidate received its action. */
+	context: EntropyContext;
+	/** Strictly validated encoding variant, when this is canonical Base64. */
+	encoding?: Base64Encoding;
+	/** Classification of strictly decoded Base64 bytes. */
+	decodedKind?: DecodedKind;
 }
 
 // ── Character set detection (regex-based, avoids writing long charset literals) ─
@@ -89,13 +104,28 @@ const CREDENTIAL_KEYS = new Set([
 	"secret",
 	"token",
 	"api_key",
+	"auth",
 	"auth_key",
 	"auth_token",
+	"access_key",
 	"access_token",
+	"encryption_key",
+	"master_key",
 	"private_key",
+	"signing_key",
 ]);
 const CREDENTIAL_KEY_PARTS = new Set(["password", "passwd", "pwd", "secret", "token"]);
-const CREDENTIAL_KEY_SUFFIXES = ["api_key", "auth_key", "auth_token", "access_token", "private_key"];
+const CREDENTIAL_KEY_SUFFIXES = [
+	"api_key",
+	"auth_key",
+	"auth_token",
+	"access_key",
+	"access_token",
+	"encryption_key",
+	"master_key",
+	"private_key",
+	"signing_key",
+];
 
 const GIT_OID_CONTEXT_KEYS = new Set([
 	"commit",
@@ -114,8 +144,10 @@ const LOWER_HEX_40 = /^[0-9a-f]{40}$/;
 const LOWER_HEX_40_OR_64 = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const LOWER_HEX_64 = /^[0-9a-f]{64}$/;
 
-// Nearest assignment key immediately before the candidate, e.g. `commit_sha: "`.
-const KEY_BEFORE = /([A-Za-z0-9_\-.]{1,40})\s*[=:]\s*["']?$/;
+// Nearest assignment key immediately before the candidate, including quoted
+// JSON/YAML keys such as `"token": "`.
+const KEY_BEFORE = /["']?([A-Za-z0-9_\-.]{1,40})["']?\s*[=:]\s*["']?$/;
+const BASIC_AUTH_BEFORE = /\b(?:proxy-)?authorization\s*:\s*basic[ \t]+["']?$/i;
 const ASSIGNMENT_KEYS_BEFORE = /(?:^|[\s,;{[("'?&])([A-Za-z0-9_\-.]{1,40})["']?\s*[=:]\s*["']?/g;
 
 function keyBefore(before: string): string | null {
@@ -221,6 +253,158 @@ function isContextuallySafe(candidate: string, text: string, start: number, end:
 	return false;
 }
 
+// ── Base64 classification ────────────────────────────────────────────────────
+
+const MAX_BASE64_DECODE_LENGTH = 256 * 1024;
+const MAX_DECODED_INSPECTION_LENGTH = 16 * 1024;
+const STANDARD_BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+const URLSAFE_BASE64 = /^[A-Za-z0-9_-]+={0,2}$/;
+
+interface DecodedBase64 {
+	bytes: Buffer;
+	encoding: Base64Encoding;
+}
+
+function withoutPadding(value: string): string {
+	return value.replace(/=+$/, "");
+}
+
+/**
+ * Buffer.from is deliberately permissive, so verify its result by encoding it
+ * again. This rejects malformed padding, mixed alphabets, and ignored junk.
+ */
+function decodeCanonicalBase64(value: string): DecodedBase64 | null {
+	if (value.length > MAX_BASE64_DECODE_LENGTH) return null;
+
+	if (STANDARD_BASE64.test(value)) {
+		const bytes = Buffer.from(value, "base64");
+		const canonical = bytes.toString("base64");
+		if (value === canonical || value === withoutPadding(canonical)) return { bytes, encoding: "base64" };
+	}
+
+	if (URLSAFE_BASE64.test(value)) {
+		const bytes = Buffer.from(value, "base64url");
+		const canonical = bytes.toString("base64url");
+		if (withoutPadding(value) === canonical && (!value.includes("=") || value.length % 4 === 0)) {
+			return { bytes, encoding: "base64url" };
+		}
+	}
+
+	return null;
+}
+
+const BINARY_SIGNATURES: ReadonlyArray<readonly number[]> = [
+	[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], // PNG
+	[0xff, 0xd8, 0xff], // JPEG
+	[0x47, 0x49, 0x46, 0x38, 0x37, 0x61], // GIF87a
+	[0x47, 0x49, 0x46, 0x38, 0x39, 0x61], // GIF89a
+	[0x25, 0x50, 0x44, 0x46, 0x2d], // PDF
+	[0x50, 0x4b, 0x03, 0x04], // ZIP
+	[0x50, 0x4b, 0x05, 0x06],
+	[0x50, 0x4b, 0x07, 0x08],
+	[0x1f, 0x8b], // gzip
+	[0x7f, 0x45, 0x4c, 0x46], // ELF
+	[0x00, 0x61, 0x73, 0x6d], // WebAssembly
+];
+
+function hasRecognizedBinarySignature(bytes: Buffer): boolean {
+	return BINARY_SIGNATURES.some(
+		(signature) => bytes.length >= signature.length && signature.every((byte, index) => bytes[index] === byte),
+	);
+}
+
+function decodeMostlyPrintableText(bytes: Buffer): string | null {
+	let decoded: string;
+	try {
+		decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+	} catch {
+		return null;
+	}
+	if (decoded.length === 0) return "";
+
+	let printable = 0;
+	let total = 0;
+	for (const char of decoded) {
+		total++;
+		const codePoint = char.codePointAt(0) ?? 0;
+		if (char === "\n" || char === "\r" || char === "\t" || (codePoint >= 0x20 && codePoint !== 0x7f)) {
+			printable++;
+		}
+	}
+	return printable / total >= 0.85 ? decoded : null;
+}
+
+function containsRecognizedCredential(text: string): boolean {
+	// Keep provider-pattern inspection bounded even when an attacker supplies a
+	// large, highly compressible printable payload. Inspect both ends because
+	// encoded configuration commonly has credentials near either boundary.
+	const windows =
+		text.length <= MAX_DECODED_INSPECTION_LENGTH
+			? [text]
+			: [text.slice(0, MAX_DECODED_INSPECTION_LENGTH / 2), text.slice(-MAX_DECODED_INSPECTION_LENGTH / 2)];
+	for (const inspected of windows) {
+		for (const pattern of SECRET_PATTERNS) {
+			pattern.regex.lastIndex = 0;
+			let match: RegExpExecArray | null;
+			while ((match = pattern.regex.exec(inspected)) !== null) {
+				const value = pattern.secretGroup === undefined ? match[0] : match[pattern.secretGroup];
+				if (value && !pattern.rejectValue?.(value)) return true;
+				if (match[0].length === 0) pattern.regex.lastIndex++;
+			}
+		}
+	}
+	return false;
+}
+
+function classifyBase64(
+	candidate: string,
+	text: string,
+	start: number,
+): Pick<EntropyFinding, "action" | "context" | "encoding" | "decodedKind"> {
+	// Keep a bounded amount of preceding syntax so multiline assignments such
+	// as `client_secret:\n  <value>` retain their credential context without
+	// letting an unrelated key arbitrarily far away affect classification.
+	const before = text.slice(Math.max(0, start - 256), start);
+	const key = keyBefore(before);
+	const credentialContext = key !== null && isCredentialKey(key);
+	const basicAuthContext = BASIC_AUTH_BEFORE.test(before);
+	const decoded = decodeCanonicalBase64(candidate);
+
+	let decodedKind: DecodedKind = "invalid";
+	let containsCredential = false;
+	if (decoded) {
+		if (hasRecognizedBinarySignature(decoded.bytes)) {
+			decodedKind = "binary";
+		} else {
+			const decodedText = decodeMostlyPrintableText(decoded.bytes);
+			if (decodedText === null) {
+				decodedKind = "non-printable";
+			} else if (containsRecognizedCredential(decodedText)) {
+				decodedKind = "credential";
+				containsCredential = true;
+			} else {
+				decodedKind = "text";
+			}
+		}
+	}
+
+	const context: EntropyContext = basicAuthContext
+		? "basic-auth"
+		: credentialContext
+			? "credential-assignment"
+			: containsCredential
+				? "encoded-credential"
+				: "ambiguous";
+
+	// Explicit credential and authentication contexts always win. Base64 is
+	// merely an identification signal only when its surrounding context is
+	// ambiguous; a benign-looking decode must not override `token=`, `api_key=`,
+	// or Authorization: Basic.
+	const action: EntropyAction =
+		credentialContext || basicAuthContext || decodedKind === "credential" ? "redact" : "report";
+	return { action, context, encoding: decoded?.encoding, decodedKind };
+}
+
 // ── Shannon entropy ────────────────────────────────────────────────────────────
 
 export function shannonEntropy(s: string): number {
@@ -240,12 +424,13 @@ export function shannonEntropy(s: string): number {
 
 const ASSIGNED_CANDIDATE =
 	/(?:^|[\s,;{[("'?&])(?:[A-Za-z0-9_\-.]{2,40})["']?\s*[=:]\s*["']?([A-Za-z0-9+/=_\-]{16,})["']?/gm;
+const BASIC_AUTH_CANDIDATE = /\b(?:proxy-)?authorization[ \t]*:[ \t]*basic[ \t]+["']?([A-Za-z0-9+/=_-]{16,})/gim;
 const QUOTED_CANDIDATE = /["']([A-Za-z0-9+/=_\-]{20,200})["']/gm;
 const STRUCTURED_CANDIDATE = /(?<=[@:/])([A-Za-z0-9=_\-]{20,})(?![A-Za-z0-9=_\-])/gm;
 
 function extractCandidates(text: string): Array<{ value: string; start: number; end: number }> {
 	const candidates: Array<{ value: string; start: number; end: number }> = [];
-	for (const extractor of [ASSIGNED_CANDIDATE, QUOTED_CANDIDATE, STRUCTURED_CANDIDATE]) {
+	for (const extractor of [ASSIGNED_CANDIDATE, BASIC_AUTH_CANDIDATE, QUOTED_CANDIDATE, STRUCTURED_CANDIDATE]) {
 		extractor.lastIndex = 0;
 		let match: RegExpExecArray | null;
 		while ((match = extractor.exec(text)) !== null) {
@@ -267,10 +452,24 @@ export function findHighEntropyStrings(text: string): EntropyFinding[] {
 	const findings: EntropyFinding[] = [];
 
 	for (const { value: candidate, start, end } of extractCandidates(text)) {
-		if (isSafe(candidate)) continue;
-
 		const charSet = detectCharSet(candidate);
 		if (!charSet) continue;
+
+		const classification =
+			charSet === "base64"
+				? classifyBase64(candidate, text, start)
+				: ({ action: "redact", context: "ambiguous" } as const);
+
+		// Safe shapes suppress ambiguous candidates. They are overridden only by
+		// an immediate credential/authentication context, not merely because the
+		// decoded bytes happen to resemble a credential.
+		if (
+			isSafe(candidate) &&
+			classification.context !== "credential-assignment" &&
+			classification.context !== "basic-auth" &&
+			classification.context !== "encoded-credential"
+		)
+			continue;
 
 		const minLen = MIN_CANDIDATE_LENGTH[charSet];
 		if (candidate.length < minLen) continue;
@@ -287,6 +486,7 @@ export function findHighEntropyStrings(text: string): EntropyFinding[] {
 				end,
 				entropy: parseFloat(entropy.toFixed(2)),
 				charSet,
+				...classification,
 			});
 		}
 	}

@@ -11,6 +11,7 @@
 import { shannonEntropy, findHighEntropyStrings } from "./entropy.ts";
 import { SECRET_PATTERNS } from "./patterns.ts";
 
+import type { DecodedKind, EntropyAction, EntropyContext, Base64Encoding } from "./entropy.ts";
 import type { SecretPattern as _SecretPattern } from "./patterns.ts";
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
@@ -28,6 +29,11 @@ export interface Finding {
 	confidence: "high" | "medium" | "low";
 	entropy?: number;
 	charSet?: string;
+	/** Entropy classification decision. Regex findings always redact. */
+	action?: EntropyAction;
+	context?: EntropyContext;
+	encoding?: Base64Encoding;
+	decodedKind?: DecodedKind;
 }
 
 export interface ScanResult {
@@ -138,9 +144,15 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 				confidence: "low",
 				entropy: ef.entropy,
 				charSet: ef.charSet,
+				action: ef.action,
+				context: ef.context,
+				encoding: ef.encoding,
+				decodedKind: ef.decodedKind,
 			};
 			findings.push(finding);
-			candidates.push({ start: ef.start, end: ef.end, placeholder: placeholder(finding.type), finding });
+			if (ef.action === "redact") {
+				candidates.push({ start: ef.start, end: ef.end, placeholder: placeholder(finding.type), finding });
+			}
 		}
 	}
 

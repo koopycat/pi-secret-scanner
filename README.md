@@ -51,6 +51,8 @@ Values are logged only when redaction is applied. `warn` mode and rejected confi
 
 Provider-specific regular expressions run first. Optional Shannon-entropy detection catches unknown credentials. It deliberately ignores a small set of intrinsically safe shapes such as UUIDs, timestamps, placeholders, and filesystem paths.
 
+High-entropy Base64 is treated as an identification signal, not proof of a secret. Ambiguous candidates appear in findings but are left unchanged. Automatic Base64 redaction requires an immediate credential assignment (for example `token=` or `api_key=`), a recognized authentication context such as `Authorization: Basic`, or canonical Base64/Base64url whose decoded printable content contains a named provider secret, private key, or credential assignment. Canonically decoded prose/source/JSON and recognized binary file signatures are not automatically redacted. Named provider regex findings retain precedence.
+
 Some hash-like values are safe in recognizable public metadata contexts and are ignored there:
 
 - **Canonical Git OIDs and GitHub Action pins.** Lowercase 40-hex SHA-1 and 64-hex SHA-256 OIDs are ignored only in explicit Git metadata positions, such as `commit_sha=<oid>` or `uses: actions/checkout@<oid>`. Short, malformed, and uppercase hashes are not ignored.
