@@ -19,7 +19,7 @@ export interface SecretPattern {
 
 const SOURCE_REFERENCE = /^[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*$/;
 const SOURCE_EXPRESSION_PREFIX =
-	/^(?:`)?[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*(?:\(|\?\?|&&|\|\||=\$\{)/;
+	/^(?:\\+)?(?:`)?[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*(?:\(|\?\?|&&|\|\||=\\?\$\{)/;
 const MASKED_SECRET = /^[A-Za-z0-9_-]*\*{4,}$/;
 
 export const SECRET_PATTERNS: SecretPattern[] = [
@@ -28,7 +28,7 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 		name: "Private Key (PEM)",
 		// Require real or escaped newlines around the body. This avoids matching
 		// arrays of source-code string fragments that merely spell both markers.
-		regex: /-----BEGIN\s(?:RSA |EC |DSA |OPENSSH |)?PRIVATE KEY-----(?:\r?\n|\\r?\\n)[A-Za-z0-9+/=\s\\]+?(?:\r?\n|\\r?\\n)-----END\s(?:RSA |EC |DSA |OPENSSH |)?PRIVATE KEY-----/g,
+		regex: /-----BEGIN\s(?:RSA |EC |DSA |OPENSSH |)?PRIVATE KEY-----(?:\r?\n|\\r\\n|\\n)[A-Za-z0-9+/=\s\\]+?(?:\r?\n|\\r\\n|\\n)-----END\s(?:RSA |EC |DSA |OPENSSH |)?PRIVATE KEY-----/g,
 		confidence: "high",
 	},
 
@@ -224,7 +224,7 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 	// ── URLs with embedded credentials ────────────────────────────────────────
 	{
 		name: "URL with Embedded Credentials",
-		regex: /[a-zA-Z][a-zA-Z0-9+\-.]*:\/\/[^@\s"'`]+:[^@\s"'`]{3,}@[^\s"'`]+/g,
+		regex: /[a-zA-Z][a-zA-Z0-9+\-.]*:\/\/[^@\s\\"'`]+:[^@\s\\"'`]{3,}@[^\s\\"'`]+/g,
 		confidence: "high",
 	},
 ];

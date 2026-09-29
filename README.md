@@ -23,7 +23,7 @@ Detection combines rules for known credential formats with entropy-based detecti
 Requires Pi `0.74.0` or newer.
 
 ```bash
-pi install git:github.com/koopycat/pi-secret-scanner@v0.2.3
+pi install git:github.com/koopycat/pi-secret-scanner@v0.2.4
 ```
 
 The versioned tag keeps your installation reproducible. Check [Releases](https://github.com/koopycat/pi-secret-scanner/releases) and install a newer tag when you choose to upgrade.
@@ -31,7 +31,7 @@ The versioned tag keeps your installation reproducible. Check [Releases](https:/
 To remove it:
 
 ```bash
-pi remove git:github.com/koopycat/pi-secret-scanner@v0.2.3
+pi remove git:github.com/koopycat/pi-secret-scanner@v0.2.4
 ```
 
 Pi packages execute local code. Review third-party package source before installation.

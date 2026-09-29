@@ -427,10 +427,21 @@ describe("SECRET_PATTERNS", () => {
 		mustDetect("JSON Web Token", jwtToken());
 	});
 
-	it("detects URL credentials without consuming surrounding quotes", () => {
+	it("detects URL credentials without consuming surrounding quotes or escapes", () => {
 		const pattern = findPat("URL with Embedded Credentials");
-		pattern.regex.lastIndex = 0;
-		expect(pattern.regex.exec(`DATABASE_URL="${urlWithCreds()}"`)?.[0]).toBe(urlWithCreds());
+		for (const suffix of ['"', "'", String.raw`\"`, String.raw`\"',\n`]) {
+			pattern.regex.lastIndex = 0;
+			expect(pattern.regex.exec(`DATABASE_URL=${urlWithCreds()}${suffix}`)?.[0]).toBe(urlWithCreds());
+		}
+	});
+
+	it("allowlists URL credentials even when serialized output follows the value", () => {
+		const value = urlWithCreds();
+		const result = scanText(`"${value}\\",`, {
+			whitelist: new Set([value]),
+			useEntropy: false,
+		});
+		expect(result.findings).toHaveLength(0);
 	});
 
 	it("detects Anthropic key", () => {
@@ -455,6 +466,7 @@ describe("SECRET_PATTERNS", () => {
 		mustNotDetect("Generic Password Assignment", "apiKey: credential?.key ?? await resolveCredential()");
 		mustNotDetect("Generic Password Assignment", 'token: githubPat("fixture")');
 		mustNotDetect("Generic Password Assignment", "token: `token=${sha64}`");
+		mustNotDetect("Generic Password Assignment", String.raw`token: \`token=\${sha64}\``);
 		mustNotDetect("Generic Password Assignment", "Token: gho_************************************");
 		mustNotDetect("Generic Password Assignment", "credential: kiloToken,");
 		mustNotDetect(
@@ -703,9 +715,27 @@ describe("scanText", () => {
 	});
 
 	it("does not mistake source-code PEM fragments for a private key", () => {
-		const source =
-			'const privateKey = ["-----BEGIN PRIVATE KEY-----", "abc1234567890", "-----END PRIVATE KEY-----"].join("\\n");';
-		expect(scanText(source, { useEntropy: false }).findings).toHaveLength(0);
+		const sources = [
+			'const privateKey = ["-----BEGIN PRIVATE KEY-----", "abc1234567890", "-----END PRIVATE KEY-----"].join("\\n");',
+			String.raw`[\"-----BEGIN PRIVATE KEY-----\", \"abc1234567890\", \"-----END PRIVATE KEY-----\"]`,
+			String.raw`['-----BEGIN PRIVATE KEY-----','YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU2Nzg5','-----END PRIVATE KEY-----']`,
+			"'-----BEGIN PRIVATE KEY-----\\n' +\n'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU2Nzg5\\n' +\n'-----END PRIVATE KEY-----'",
+		];
+		for (const source of sources) {
+			expect(scanText(source, { useEntropy: false }).findings).toHaveLength(0);
+		}
+	});
+
+	it("does not detect recursively escaped fixture output as another PEM block", () => {
+		const escapedValues = [
+			String.raw`-----BEGIN PRIVATE KEY-----\\nYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU2Nzg5\\n-----END PRIVATE KEY-----`,
+			String.raw`-----BEGIN PRIVATE KEY-----\\\\+nYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU2Nzg5\\\\+n-----END PRIVATE KEY-----`,
+			String.raw`-----BEGIN PRIVATE KEY-----\", \"abc1234567890\", \"-----END PRIVATE KEY-----`,
+			String.raw`-----BEGIN PRIVATE KEY-----\\n' +\n'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU2Nzg5\\n' +\n'-----END PRIVATE KEY-----`,
+		];
+		for (const escaped of escapedValues) {
+			expect(scanText(escaped, { useEntropy: false }).findings).toHaveLength(0);
+		}
 	});
 
 	it("is idempotent", () => {
