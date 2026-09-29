@@ -125,17 +125,10 @@ const CREDENTIAL_KEY_SUFFIXES = [
 	"master_key",
 	"private_key",
 	"signing_key",
+	"signature",
 ];
 
-const GENERIC_HEX_CONTEXT_KEYS = new Set([
-	"id",
-	"hash",
-	"digest",
-	"checksum",
-	"signature",
-	"fingerprint",
-	"identifier",
-]);
+const GENERIC_HEX_CONTEXT_KEYS = new Set(["id", "hash", "digest", "checksum", "fingerprint", "identifier"]);
 
 const GIT_OID_CONTEXT_KEYS = new Set([
 	"commit",

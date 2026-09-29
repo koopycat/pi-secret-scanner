@@ -65,9 +65,9 @@ export interface ScanOptions {
 	skipString?: (key: string, value: string, parent: Record<string, unknown>) => boolean;
 	/** Ephemeral cache of sanitized text, owned and invalidated by the extension. */
 	textCache?: Map<string, ScanCacheEntry>;
-	/** Force a scan while refreshing the cache, rather than reusing a cached entry. */
+	/** When false, bypass cache reads and scan fresh (the result still refreshes the entry). */
 	cacheRead?: boolean;
-	/** Do not write a scan result to the cache (used when a user may decline redaction). */
+	/** When false, keep the scan result out of the cache (used when a user may decline redaction). */
 	cacheWrite?: boolean;
 	/** Hashes text before using it as a cache key, avoiding raw transcript keys. */
 	textCacheKey?: (text: string) => string;
@@ -103,9 +103,11 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 		// Refresh insertion order for the bounded LRU-like cache.
 		options?.textCache?.delete(textKey);
 		options?.textCache?.set(textKey, cached);
+		// Copy on hit: callers must never hold references to cache-owned state,
+		// or a stray mutation would silently corrupt every future cache read.
 		return {
-			findings: cached.findings,
-			redactions: cached.redactions,
+			findings: cached.findings.map((finding) => ({ ...finding })),
+			redactions: cached.redactions.map((finding) => ({ ...finding })),
 			redacted: cached.redacted,
 			fromCache: true,
 		};

@@ -174,6 +174,17 @@ describe("findHighEntropyStrings", () => {
 		}
 	});
 
+	it("redacts HEX under signature keys as credential-bearing", () => {
+		// HMAC/webhook signatures are secrets, not public metadata — the generic
+		// metadata exemption must not apply to them.
+		const sha = gitSha40();
+		for (const text of [`signature=${sha}`, `x_hub_signature: ${sha}`]) {
+			const result = findHighEntropyStrings(text);
+			expect(result).toHaveLength(1);
+			expect(result[0]).toMatchObject({ action: "redact", context: "credential-assignment" });
+		}
+	});
+
 	it("ignores canonical Git OIDs in public metadata contexts", () => {
 		const sha40 = gitSha40();
 		const sha64 = gitSha64();
@@ -839,6 +850,19 @@ describe("scanObject", () => {
 		expect(second.freshRedactions).toHaveLength(0);
 		expect(second.redactedObject).toEqual(first.redactedObject);
 		expect(second.redactions[0]?.value).toBe("");
+	});
+
+	it("does not expose cache-owned finding objects to callers", () => {
+		const cache = new Map();
+		const options = { textCache: cache, textCacheKey: (text: string) => text };
+		const obj = { prompt: `token=${githubPat()}` };
+
+		scanObject(obj, options);
+		const second = scanObject(obj, options);
+		second.findings[0]!.type = "MUTATED";
+
+		const third = scanObject(obj, options);
+		expect(third.findings[0]?.type).not.toBe("MUTATED");
 	});
 
 	it("handles null/undefined/numbers gracefully", () => {
