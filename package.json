@@ -1,6 +1,6 @@
 {
 	"name": "pi-secret-scanner",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"type": "module",
 	"description": "Pi extension that scans outgoing LLM requests and file/bash tool results for secrets and redacts them before they leave the machine.",
 	"keywords": [
