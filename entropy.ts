@@ -252,7 +252,7 @@ function startsWithUrlScheme(before: string): boolean {
 	return URL_SCHEME_PREFIX.test(cut === -1 ? before : before.slice(cut + 1));
 }
 
-function classifyOpaqueEntropy(text: string, start: number): Pick<EntropyFinding, "action" | "context"> {
+function classifyOpaqueEntropy(text: string, start: number, bare = false): Pick<EntropyFinding, "action" | "context"> {
 	const before = text.slice(Math.max(0, start - 256), start);
 	const key = keyBefore(before);
 	const nestedCredential = /(?:^|[\s,;{[(]"?)([A-Za-z0-9_.-]{1,40})["']?\s*[=:]\s*sha(?:1|256):\s*$/i.exec(before);
@@ -265,11 +265,14 @@ function classifyOpaqueEntropy(text: string, start: number): Pick<EntropyFinding
 	// replacing a URL segment corrupts the link, and public URL identifiers
 	// (commit URLs, artifact digests) vastly outnumber URL-embedded secrets.
 	const urlPathContext = /[/\\]$/.test(before) && startsWithUrlScheme(before);
+	// Standalone hex without any key/quote/separator context is report-only:
+	// free prose is full of public hashes, and generated keys pasted as prose
+	// still deserve visibility without corrupting the surrounding text.
 	return credentialContext
 		? { action: "redact", context: "credential-assignment" }
 		: genericHexContext
 			? { action: "report", context: "ambiguous" }
-			: urlPathContext
+			: urlPathContext || bare
 				? { action: "report", context: "ambiguous" }
 				: { action: "redact", context: "ambiguous" };
 }
@@ -582,14 +585,25 @@ const ASSIGNED_CANDIDATE =
 const BASIC_AUTH_CANDIDATE = /\b(?:proxy-)?authorization[ \t]*:[ \t]*basic[ \t]+["']?([A-Za-z0-9+/=_-]{16,})/gim;
 const QUOTED_CANDIDATE = /["']([A-Za-z0-9+/=_\-]{20,200})["']/gm;
 const STRUCTURED_CANDIDATE = /(?<=[@:/])([A-Za-z0-9=_\-]{20,})(?![A-Za-z0-9=_\-])/gm;
+// Standalone hex runs of MD5 length or more with no key, quote, or separator
+// around them — generated keys pasted as free prose. Extracted so they are at
+// least reported; `bare` keeps them report-only, since free prose is full of
+// public hashes that must not be replaced.
+const BARE_HEX_CANDIDATE = /(?<![0-9a-fA-F])([0-9a-f]{32,})(?![0-9a-fA-F])/g;
 
-function extractCandidates(text: string): Array<{ value: string; start: number; end: number }> {
-	const candidates: Array<{ value: string; start: number; end: number }> = [];
+function extractCandidates(text: string): Array<{ value: string; start: number; end: number; bare: boolean }> {
+	const candidates: Array<{ value: string; start: number; end: number; bare: boolean }> = [];
 	const seen = new Set<string>();
-	for (const extractor of [ASSIGNED_CANDIDATE, BASIC_AUTH_CANDIDATE, QUOTED_CANDIDATE, STRUCTURED_CANDIDATE]) {
-		extractor.lastIndex = 0;
+	for (const { regex, bare } of [
+		{ regex: ASSIGNED_CANDIDATE, bare: false },
+		{ regex: BASIC_AUTH_CANDIDATE, bare: false },
+		{ regex: QUOTED_CANDIDATE, bare: false },
+		{ regex: STRUCTURED_CANDIDATE, bare: false },
+		{ regex: BARE_HEX_CANDIDATE, bare: true },
+	]) {
+		regex.lastIndex = 0;
 		let match: RegExpExecArray | null;
-		while ((match = extractor.exec(text)) !== null) {
+		while ((match = regex.exec(text)) !== null) {
 			const value = match[1];
 			if (!value) continue;
 			const offset = match[0].indexOf(value);
@@ -601,7 +615,7 @@ function extractCandidates(text: string): Array<{ value: string; start: number; 
 			const key = `${start}:${end}`;
 			if (!seen.has(key)) {
 				seen.add(key);
-				candidates.push({ value, start, end });
+				candidates.push({ value, start, end, bare });
 			}
 		}
 	}
@@ -611,7 +625,7 @@ function extractCandidates(text: string): Array<{ value: string; start: number; 
 export function findHighEntropyStrings(text: string): EntropyFinding[] {
 	const findings: EntropyFinding[] = [];
 
-	for (const { value: candidate, start, end } of extractCandidates(text)) {
+	for (const { value: candidate, start, end, bare } of extractCandidates(text)) {
 		const charSet = detectCharSet(candidate);
 		if (!charSet) continue;
 
@@ -626,7 +640,7 @@ export function findHighEntropyStrings(text: string): EntropyFinding[] {
 		if (entropy < threshold) continue;
 
 		const classification =
-			charSet === "base64" ? classifyBase64(candidate, text, start) : classifyOpaqueEntropy(text, start);
+			charSet === "base64" ? classifyBase64(candidate, text, start) : classifyOpaqueEntropy(text, start, bare);
 
 		// Safe shapes suppress ambiguous candidates. They are overridden only by
 		// an immediate credential/authentication context, not merely because the

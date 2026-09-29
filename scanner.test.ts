@@ -783,6 +783,22 @@ describe("scanText", () => {
 		}
 	});
 
+	it("reports bare openssl-style hex pasted as prose without redacting it", () => {
+		// Generated keys pasted as free prose have no key/quote/separator context;
+		// they were previously invisible to candidate extraction entirely.
+		const text = `the generated key was ${gitSha64()} per plan`;
+		const result = scanText(text);
+		expect(result.findings).toHaveLength(1);
+		expect(result.findings[0]).toMatchObject({ type: "High-Entropy HEX", action: "report", context: "ambiguous" });
+		expect(result.redactions).toHaveLength(0);
+		expect(result.redacted).toBe(text);
+	});
+
+	it("still suppresses bare hex after prose mentions of commit", () => {
+		const text = `reverted in commit ${gitSha40()} this morning`;
+		expect(scanText(text).findings).toHaveLength(0);
+	});
+
 	it("suppresses the same OID only in the safe occurrence (occurrence-local)", () => {
 		const sha = gitSha40();
 		const text = `commit_sha: ${sha}\nUNKNOWN=${sha}`;
