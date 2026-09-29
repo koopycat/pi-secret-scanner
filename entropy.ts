@@ -308,6 +308,19 @@ function isContextuallySafe(candidate: string, text: string, start: number, end:
 	// Docker/OCI digest syntax: `sha256:<64 lowercase hex>`.
 	if (LOWER_HEX_64.test(candidate) && /(?:^|[@:\s])sha256:\s*$/.test(before)) return true;
 
+	// Hex-named filesystem segments are content addresses (git object files,
+	// Docker overlay layers, content-addressed build caches, temp dirs), not
+	// secrets. Only pure lowercase hex qualifies — alphanumeric URL-path
+	// segments (webhook IDs, …) stay detectable — and this sits below the
+	// credential guard, so `token=/…/<hex>` still redacts.
+	if (
+		/^[0-9a-f]{20,}$/.test(candidate) &&
+		/[/\\]$/.test(before) &&
+		(end >= text.length || /^[\s/\\."'),;:\]}]/.test(text[end] ?? ""))
+	) {
+		return true;
+	}
+
 	// Bare Docker image/container IDs (underscore or hyphen variants).
 	if (LOWER_HEX_64.test(candidate) && key && /^(?:docker[-_]?)?(?:image|container)[-_]id$/.test(key.toLowerCase())) {
 		return true;

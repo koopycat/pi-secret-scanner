@@ -741,6 +741,31 @@ describe("scanText", () => {
 		}
 	});
 
+	it("leaves hex-named filesystem segments in tool output untouched", () => {
+		// Content-addressed path components (Docker overlay layers, git object
+		// files, build-cache keys) previously got redacted, so the edit tool then
+		// tried to edit `[REDACTED:HIGH-ENTROPY_HEX]` paths.
+		const gitObjectSha = gitSha40().slice(2); // 38-hex remainder after the 2-char fan-out dir
+		const texts = [
+			`drwxr-xr-x /var/lib/docker/overlay2/${gitSha64()}/diff`,
+			`wrote /home/ci/.cache/build/${gitSha40()}/output.js`,
+			`/repo/.git/objects/ab/${gitObjectSha}`,
+		];
+		for (const text of texts) {
+			const result = scanText(text);
+			expect(result.findings).toHaveLength(0);
+			expect(result.redacted).toBe(text);
+		}
+	});
+
+	it("still detects non-hex path segments and hex under credential keys", () => {
+		// The path-segment exemption is deliberately restricted to pure lowercase
+		// hex: mixed-alphanumeric path/URL segments can be secrets (webhook IDs).
+		const mixed = "aB3xK9mQ2vR7wZ4yN6tP1cF8";
+		expect(scanText(`read /services/T000/B000/${mixed}`).findings.length).toBeGreaterThan(0);
+		expect(scanText(`token=/var/lib/docker/overlay2/${gitSha64()}/diff`).redactions).toHaveLength(1);
+	});
+
 	it("suppresses the same OID only in the safe occurrence (occurrence-local)", () => {
 		const sha = gitSha40();
 		const text = `commit_sha: ${sha}\nUNKNOWN=${sha}`;
