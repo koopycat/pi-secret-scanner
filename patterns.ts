@@ -17,6 +17,9 @@ export interface SecretPattern {
 	confidence: "high" | "medium";
 }
 
+const SOURCE_REFERENCE = /^[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*$/;
+const SOURCE_EXPRESSION_PREFIX = /^[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*(?:\(|\?\?|&&|\|\|)/;
+
 export const SECRET_PATTERNS: SecretPattern[] = [
 	// ── PEM private keys ──────────────────────────────────────────────────────
 	{
@@ -192,6 +195,7 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 	// the regex because the `i` flag folds [A-Z] onto lowercase, making case
 	// detection inside the pattern impossible):
 	//   - dotted / optional-chained references (process.env.FOO, opts?.apiKey)
+	//   - nullish/logical source expressions and function calls
 	//   - bare camelCase/PascalCase identifiers (apiKey: kiloToken)
 	// All-lowercase identifier values (password=hunter2) and hyphenated literals
 	// (apiKey: literal-api-key-value) are still detected.
@@ -202,7 +206,10 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 		confidence: "medium",
 		rejectValue: (value) =>
 			// Dotted / optional-chained references: process.env.FOO, opts?.apiKey.
-			/^[A-Za-z_$][A-Za-z0-9_$]*(?:\?\.[A-Za-z_$][A-Za-z0-9_$]*|\.[A-Za-z_$][A-Za-z0-9_$]*)+$/.test(value) ||
+			SOURCE_REFERENCE.test(value) ||
+			// Truncated source expressions: the assignment matcher stops at whitespace
+			// and quotes, so calls and nullish/logical expressions end here.
+			SOURCE_EXPRESSION_PREFIX.test(value) ||
 			// Bare camelCase/PascalCase identifiers: local variables, object props.
 			/^[A-Za-z_$][A-Za-z0-9_$]*[A-Z][A-Za-z0-9_$]*$/.test(value),
 	},

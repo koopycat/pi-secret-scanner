@@ -450,6 +450,8 @@ describe("SECRET_PATTERNS", () => {
 			'const[REDACTED:GENERIC_PASSWORD_ASSIGNMENT] ?? process.env.MISTRAL_API_KEY ?? "";',
 		);
 		mustNotDetect("Generic Password Assignment", "apiKey: kiloToken,");
+		mustNotDetect("Generic Password Assignment", "apiKey: credential?.key ?? await resolveCredential()");
+		mustNotDetect("Generic Password Assignment", 'token: githubPat("fixture")');
 		mustNotDetect("Generic Password Assignment", "credential: kiloToken,");
 		mustNotDetect(
 			"Generic Password Assignment",
