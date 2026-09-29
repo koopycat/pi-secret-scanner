@@ -93,9 +93,10 @@ function isSafe(candidate: string): boolean {
 
 // ── Contextual false-positive suppression ──────────────────────────────────────
 // Canonical public identifiers (Git OIDs, Docker/OCI digests and IDs, pinned
-// GitHub Action refs, docker-desktop build URLs) are only safe when they appear
-// in the metadata context that produces them. The same hex/string under an
-// ambiguous or credential-bearing key stays detectable.
+// GitHub Action refs, docker-desktop build URLs) are suppressed conservatively.
+// A lowercase 40-hex SHA-1 is recognized by shape because Git OIDs commonly
+// appear bare in command output; other identifiers require producing context.
+// Credential-bearing keys always take precedence over these suppressions.
 
 const CREDENTIAL_KEYS = new Set([
 	"password",
@@ -317,6 +318,12 @@ function isContextuallySafe(candidate: string, text: string, start: number, end:
 	// Check every assignment before the candidate so nested syntax such as
 	// `token=sha256:<value>` cannot disguise a credential as a public digest.
 	if (hasCredentialAssignment(before)) return false;
+
+	// Git's canonical SHA-1 object IDs commonly appear bare in command output,
+	// where there is no reliable contextual marker. Recognize the exact lowercase
+	// 40-hex shape globally. Keep this below the credential guard so values under
+	// `token=`, `secret=`, and similar keys remain detected.
+	if (LOWER_HEX_40.test(candidate)) return true;
 
 	// Package-manager Subresource Integrity hashes are public verification data.
 	// Keep this below the credential guard so `token=sha512-...` remains detected.

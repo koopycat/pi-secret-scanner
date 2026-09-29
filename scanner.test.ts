@@ -165,9 +165,9 @@ describe("findHighEntropyStrings", () => {
 		expect(findHighEntropyStrings(`token=${sri}`)).toHaveLength(1);
 	});
 
-	it("reports ambiguous HEX metadata without redacting it", () => {
-		const sha40 = gitSha40();
-		for (const text of [`id: ${sha40}`, `digest: ${sha40}`, `checksum=${sha40}`]) {
+	it("reports ambiguous non-Git HEX metadata without redacting it", () => {
+		const sha64 = gitSha64();
+		for (const text of [`id: ${sha64}`, `digest: ${sha64}`, `checksum=${sha64}`]) {
 			const result = findHighEntropyStrings(text);
 			expect(result).toHaveLength(1);
 			expect(result[0]).toMatchObject({ action: "report", context: "ambiguous" });
@@ -185,17 +185,26 @@ describe("findHighEntropyStrings", () => {
 		}
 	});
 
-	it("ignores canonical Git OIDs in public metadata contexts", () => {
+	it("ignores canonical Git OIDs, including bare SHA-1 values", () => {
 		const sha40 = gitSha40();
 		const sha64 = gitSha64();
-		// 40-hex commit SHAs under explicit public metadata keys…
-		expect(findHighEntropyStrings(`commit_sha: ${sha40}`)).toHaveLength(0);
-		expect(findHighEntropyStrings(`oid: "${sha40}"`)).toHaveLength(0);
-		expect(findHighEntropyStrings(`rev: ${sha40}`)).toHaveLength(0);
-		// …and 64-hex SHA-256 OIDs under the same keys.
+		const releaseCommit = ["573d69eb237c02d5ae2", "a75cbf35300a9dd550424"].join("");
+		// Canonical lowercase SHA-1 OIDs are recognizable by shape alone, including
+		// ordinary command output without an explicit metadata key.
+		for (const text of [
+			sha40,
+			`${releaseCommit} Release v0.2.4`,
+			`HEAD is now at ${releaseCommit} Release v0.2.4`,
+			`commit_sha: ${sha40}`,
+			`oid: "${sha40}"`,
+			`rev: ${sha40}`,
+			`commit ${sha40}\nAuthor: Dev <dev@example.com>`,
+		]) {
+			expect(findHighEntropyStrings(text), `unexpected detection in: ${text}`).toHaveLength(0);
+		}
+		// SHA-256 OIDs still require an explicit Git context because a bare
+		// 64-character hex value is also a common secret shape.
 		expect(findHighEntropyStrings(`git_oid = "${sha64}"`)).toHaveLength(0);
-		// `git log` output: bare `commit <oid>` line.
-		expect(findHighEntropyStrings(`commit ${sha40}\nAuthor: Dev <dev@example.com>`)).toHaveLength(0);
 	});
 
 	it("ignores pinned GitHub Action refs (owner/repo@OID)", () => {
@@ -257,19 +266,16 @@ describe("findHighEntropyStrings", () => {
 		expect(findings.map((finding) => finding.value)).toContain(value);
 	});
 
-	it("still detects Git OIDs under ambiguous or credential-bearing keys", () => {
+	it("still detects malformed Git OIDs, ambiguous SHA-256 values, and credential-bearing values", () => {
 		const sha40 = gitSha40();
 		const sha64 = gitSha64();
 		const detections = [
-			// Bare ambiguous keys.
-			`UNKNOWN=${sha40}`,
-			`id=${sha40}`,
+			// A bare 64-hex value is ambiguous without explicit Git context.
 			`checksum: ${sha64}`,
 			// Wrong lengths do not qualify for suppression, even under canonical keys.
 			`commit_sha=${sha40.slice(0, 39)}`,
 			`commit_sha: "${sha64.slice(0, 63)}"`,
 			`sha1=${sha64}`,
-			`sha256=${sha40}`,
 			// Digest prefix with a truncated value.
 			`digest: sha256:${sha64.slice(0, 63)}`,
 			// Uppercase is outside the lowercase-only policy.
@@ -362,9 +368,9 @@ describe("findHighEntropyStrings", () => {
 		).toEqual([sha40.slice(0, 39)]);
 	});
 
-	it("detects a digest prefix with a non-64-hex value (malformed digest)", () => {
+	it("recognizes a canonical SHA-1 even after a mismatched digest prefix", () => {
 		const sha40 = gitSha40();
-		expect(findHighEntropyStrings(`digest: sha256:${sha40}`).map((f) => f.value)).toEqual([sha40]);
+		expect(findHighEntropyStrings(`digest: sha256:${sha40}`)).toHaveLength(0);
 	});
 
 	it("extracts quoted high-entropy strings", () => {
@@ -768,8 +774,8 @@ describe("scanText", () => {
 		expect(twilio).toBeDefined();
 	});
 
-	it("reports ambiguous HEX in generic metadata contexts without redacting it", () => {
-		const sha = gitSha40();
+	it("reports ambiguous non-Git HEX in generic metadata contexts without redacting it", () => {
+		const sha = gitSha64();
 		for (const text of [`id=${sha}`, `digest: ${sha}`, `checksum: ${sha}`]) {
 			const result = scanText(text);
 			expect(result.findings).toHaveLength(1);
@@ -808,21 +814,24 @@ describe("scanText", () => {
 		expect(scanText(`token=/var/lib/docker/overlay2/${gitSha64()}/diff`).redactions).toHaveLength(1);
 	});
 
-	it("reports identifiers embedded in URL paths without replacing them", () => {
-		// URL segments must neither be exempted (a URL-embedded secret would be
-		// silently missed) nor redacted (replacing a segment corrupts the link).
-		const texts = [
+	it("ignores SHA-1 identifiers and reports ambiguous SHA-256 identifiers in URL paths", () => {
+		for (const text of [
 			`see https://github.com/owner/repo/commit/${gitSha40()} for details`,
-			`fetched https://cdn.example.com/builds/${gitSha64()}.tgz`,
 			`docs: [release notes](https://github.com/owner/repo/commit/${gitSha40()})`,
-		];
-		for (const text of texts) {
+		]) {
 			const result = scanText(text);
-			expect(result.findings.length).toBeGreaterThan(0);
-			expect(result.findings.every((finding) => finding.action === "report")).toBe(true);
-			expect(result.redactions).toHaveLength(0);
+			expect(result.findings).toHaveLength(0);
 			expect(result.redacted).toBe(text);
 		}
+
+		// A bare 64-hex URL segment is not necessarily a Git SHA-256 OID. Report
+		// it without corrupting the URL.
+		const text = `fetched https://cdn.example.com/builds/${gitSha64()}.tgz`;
+		const result = scanText(text);
+		expect(result.findings.length).toBeGreaterThan(0);
+		expect(result.findings.every((finding) => finding.action === "report")).toBe(true);
+		expect(result.redactions).toHaveLength(0);
+		expect(result.redacted).toBe(text);
 	});
 
 	it("reports bare openssl-style hex pasted as prose without redacting it", () => {
@@ -841,17 +850,17 @@ describe("scanText", () => {
 		expect(scanText(text).findings).toHaveLength(0);
 	});
 
-	it("suppresses the same OID only in the safe occurrence (occurrence-local)", () => {
+	it("suppresses an OID except in credential-bearing occurrences", () => {
 		const sha = gitSha40();
-		const text = `commit_sha: ${sha}\nUNKNOWN=${sha}`;
+		const text = `commit_sha: ${sha}\ntoken=${sha}`;
 		const result = scanText(text);
 		expect(result.findings).toHaveLength(1);
 		expect(result.redactions).toHaveLength(1);
-		// Exact output: the metadata occurrence survives verbatim, the ambiguous one is redacted.
-		expect(result.redacted).toBe(`commit_sha: ${sha}\nUNKNOWN=[REDACTED:HIGH-ENTROPY_HEX]`);
+		// Exact output: the public occurrence survives verbatim, while credential
+		// context takes precedence over OID recognition.
+		expect(result.redacted).toBe(`commit_sha: ${sha}\ntoken=[REDACTED:GENERIC_PASSWORD_ASSIGNMENT]`);
 		expect(result.findings[0]?.value).toBe(sha);
-		expect(result.findings[0]?.type).toBe("High-Entropy HEX");
-		expect(result.findings[0]?.charSet).toBe("hex");
+		expect(result.findings[0]?.type).toBe("Generic Password Assignment");
 	});
 
 	it("does not scan provider signature fields as prompt text", () => {
