@@ -289,18 +289,48 @@ describe("findHighEntropyStrings", () => {
 		expect(findHighEntropyStrings(`token=x ${filler} sha256:${sha64}`)).toHaveLength(0);
 	});
 
-	it("scans large single-line documents in bounded time", () => {
-		// Regression guard for the quadratic scan cost: candidate extraction used
-		// to rescan the whole line prefix per candidate, taking ~24s on a 400KB
-		// single-line document. The bound is generous to stay CI-stable while
-		// still catching an O(n²) blowup.
-		const values = Array.from({ length: 2000 }, (_, i) =>
-			Buffer.from(`value number ${i} with some more prose text to decode`).toString("base64"),
-		);
-		const text = JSON.stringify(Object.fromEntries(values.map((v, i) => [`key${i}`, v])));
-		const started = performance.now();
-		expect(scanText(text, { useEntropy: true }).findings).toHaveLength(2000);
-		expect(performance.now() - started).toBeLessThan(5000);
+	it("scans pathological large documents in bounded time", () => {
+		// Regression guard for the quadratic scan cost. Three shapes that used to
+		// blow up (before the bounded-context fix these took ~14s, ~25s and ~24s
+		// respectively): a document with many decodable Base64 values, one huge
+		// Base64 blob that spawns a candidate at every "/" inside it, and a
+		// single-line minified bundle where every candidate previously triggered
+		// an unbounded line scan. Bounds are generous to stay CI-stable while
+		// still failing hard on an O(candidates x document length) regression.
+		const cases: Array<[string, string, number]> = [
+			[
+				"many Base64 values",
+				JSON.stringify(
+					Object.fromEntries(
+						Array.from({ length: 2000 }, (_, i) => [
+							`key${i}`,
+							Buffer.from(`value number ${i} with some more prose text to decode`).toString("base64"),
+						]),
+					),
+				),
+				2000,
+			],
+			[
+				"one huge Base64 blob",
+				`data ${Buffer.from(Array.from({ length: 200 * 1024 }, () => (Math.random() * 256) | 0)).toString("base64")}`,
+				1500,
+			],
+			[
+				"minified single-line JS",
+				Array.from(
+					{ length: 4000 },
+					(_, i) => `var e${i}="${Buffer.from(`module ${i} payload string here`).toString("base64")}",`,
+				).join(""),
+				4000,
+			],
+		];
+		for (const [label, text, expectedFindings] of cases) {
+			const started = performance.now();
+			const result = scanText(text, { useEntropy: true });
+			const elapsed = performance.now() - started;
+			expect(result.findings.length, label).toBeGreaterThanOrEqual(expectedFindings);
+			expect(elapsed, `${label} must scan in bounded time`).toBeLessThan(2000);
+		}
 	});
 
 	it("detects malformed action pins without flagging the public repository slug", () => {
