@@ -46,7 +46,7 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 
 import { SECRET_PATTERNS } from "./patterns.ts";
-import { countByType, formatFindings, scanObject, scanText } from "./scanner.ts";
+import { countByType, formatConfirmFindings, scanObject, scanText } from "./scanner.ts";
 
 import type { ScanCacheEntry, ScanOptions } from "./scanner.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -384,12 +384,12 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (mode === "confirm" && ctx.hasUI) {
-			const redactionSummary = formatFindings(result.freshRedactions);
+			const redactionSummary = formatConfirmFindings(result.freshRedactions);
 			const redactionCount = result.freshRedactions.length;
 			const redactionLabel = redactionCount === 1 ? "secret" : "secrets";
 			const ok = await ctx.ui.confirm(
 				`🔐 Secret Scanner: ${redactionCount} potential ${redactionLabel} detected`,
-				`Redact before sending to LLM?\n\n${redactionSummary}\n\nChoose "Yes" to redact, "No" to send as-is.`,
+				`Redact before sending to LLM?\n\n${redactionSummary}\n\nThe values above are intentionally disclosed in this confirmation UI so you can decide. Choose "Yes" to redact, "No" to send as-is.`,
 			);
 			if (!ok) {
 				return;
@@ -437,12 +437,12 @@ export default function (pi: ExtensionAPI) {
 				if (mode === "warn") {
 					newContent.push(item);
 				} else if (mode === "confirm" && ctx.hasUI && !result.fromCache && result.redactions.length > 0) {
-					const summary = formatFindings(result.redactions);
+					const summary = formatConfirmFindings(result.redactions);
 					const count = result.redactions.length;
 					const label = count === 1 ? "secret" : "secrets";
 					const ok = await ctx.ui.confirm(
-						`🔐 Secret Scanner: ${count} potential ${label} in file`,
-						`Redact from file contents before adding to context?\n\n${summary}`,
+						`🔐 Secret Scanner: ${count} potential ${label} in ${event.toolName} output`,
+						`Redact before adding this ${event.toolName} output to context?\n\n${summary}\n\nThe values above are intentionally disclosed in this confirmation UI so you can decide.`,
 					);
 					if (ok) {
 						redactionCount = redactionCount + result.redactions.length;

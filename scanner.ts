@@ -382,6 +382,53 @@ export function formatFindings(findings: Finding[]): string {
 	return lines.join("\n");
 }
 
+/**
+ * Format findings for an explicit confirmation dialog. Unlike the ordinary
+ * summary, this intentionally includes complete values so the user can make
+ * an informed decision. Values are escaped onto one line to prevent terminal
+ * control characters from changing the dialog rendering.
+ */
+export function formatConfirmFindings(findings: Finding[]): string {
+	if (findings.length === 0) return "No secrets detected.";
+
+	const grouped = new Map<string, Map<string, { finding: Finding; count: number }>>();
+	for (const finding of findings) {
+		let values = grouped.get(finding.type);
+		if (!values) {
+			values = new Map();
+			grouped.set(finding.type, values);
+		}
+
+		const existing = values.get(finding.value);
+		if (existing) existing.count++;
+		else values.set(finding.value, { finding, count: 1 });
+	}
+
+	const lines: string[] = [];
+	for (const values of grouped.values()) {
+		for (const { finding, count } of values.values()) {
+			const confidence = finding.confidence === "high" ? "🔴" : finding.confidence === "medium" ? "🟡" : "🟢";
+			let heading = `${confidence} ${finding.type}`;
+			if (finding.entropy) {
+				heading += ` (entropy: ${finding.entropy.toFixed(1)}, charset: ${finding.charSet})`;
+			}
+			if (count > 1) heading += ` — ${count} occurrences`;
+
+			lines.push(heading, `  Value: ${escapeConfirmationValue(finding.value)}`);
+		}
+	}
+
+	return lines.join("\n");
+}
+
+function escapeConfirmationValue(value: string): string {
+	const json = JSON.stringify(value);
+	return json.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, (character) => {
+		const codePoint = character.codePointAt(0) ?? 0;
+		return codePoint <= 0xffff ? `\\u${codePoint.toString(16).padStart(4, "0")}` : `\\u{${codePoint.toString(16)}}`;
+	});
+}
+
 export function countByType(findings: Finding[]): Record<string, number> {
 	const counts: Record<string, number> = {};
 	for (const f of findings) {

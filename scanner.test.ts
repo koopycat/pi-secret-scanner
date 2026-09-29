@@ -11,7 +11,7 @@ import { describe, it, expect } from "vitest";
 
 import { shannonEntropy, findHighEntropyStrings } from "./entropy.ts";
 import { SECRET_PATTERNS } from "./patterns.ts";
-import { scanText, scanObject, formatFindings, countByType } from "./scanner.ts";
+import { scanText, scanObject, formatFindings, formatConfirmFindings, countByType } from "./scanner.ts";
 
 // ── String builders (concatenation prevents source-level regex matches) ──────
 
@@ -1001,6 +1001,48 @@ describe("formatFindings", () => {
 		const f = [{ type: "Z", source: "regex" as const, value: "super-secret-actual", confidence: "high" as const }];
 		const r = formatFindings(f);
 		expect(r).not.toContain("super-secret");
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// formatConfirmFindings
+// ═══════════════════════════════════════════════════════════════════════
+
+describe("formatConfirmFindings", () => {
+	it("shows every distinct exact value of the same type", () => {
+		const findings = [
+			{ type: "Test", source: "regex" as const, value: "first-secret", confidence: "high" as const },
+			{ type: "Test", source: "regex" as const, value: "second-secret", confidence: "high" as const },
+		];
+
+		const result = formatConfirmFindings(findings);
+
+		expect(result).toContain('Value: "first-secret"');
+		expect(result).toContain('Value: "second-secret"');
+	});
+
+	it("groups duplicate values and reports their occurrence count", () => {
+		const finding = {
+			type: "Test",
+			source: "regex" as const,
+			value: "repeated-secret",
+			confidence: "high" as const,
+		};
+
+		const result = formatConfirmFindings([finding, finding, finding]);
+
+		expect(result.match(/repeated-secret/g)).toHaveLength(1);
+		expect(result).toContain("3 occurrences");
+	});
+
+	it("escapes terminal controls while preserving the complete value", () => {
+		const value = 'line 1\nline 2\t"quoted"\\path\0\u001b\u007f\u0085\u200b\u202e\u2066\u2028\u2029';
+		const result = formatConfirmFindings([{ type: "Test", source: "regex", value, confidence: "high" }]);
+
+		expect(result).toContain(
+			'Value: "line 1\\nline 2\\t\\"quoted\\"\\\\path\\u0000\\u001b\\u007f\\u0085\\u200b\\u202e\\u2066\\u2028\\u2029"',
+		);
+		expect(result).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\p{Cf}\u2028\u2029]/u);
 	});
 });
 

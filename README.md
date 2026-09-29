@@ -44,12 +44,12 @@ Redaction is enabled automatically. Run this inside Pi to check the current mode
 /secret-scanner
 ```
 
-| Mode      | Behavior                                                                             |
-| --------- | ------------------------------------------------------------------------------------ |
-| `redact`  | Replaces detected secrets before sending them. **Default.**                          |
-| `warn`    | Records detections but sends content unchanged.                                      |
-| `confirm` | Asks before redacting in interactive sessions; falls back to redaction without a UI. |
-| `off`     | Disables scanning.                                                                   |
+| Mode      | Behavior                                                                                                       |
+| --------- | -------------------------------------------------------------------------------------------------------------- |
+| `redact`  | Replaces detected secrets before sending them. **Default.**                                                    |
+| `warn`    | Records detections but sends content unchanged.                                                                |
+| `confirm` | Shows detected values and asks before redacting in interactive sessions; falls back to redaction without a UI. |
+| `off`     | Disables scanning.                                                                                             |
 
 ```text
 /secret-scanner off|warn|redact|confirm

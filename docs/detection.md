@@ -2,6 +2,8 @@
 
 Pi Secret Scanner is a heuristic safety net. It reduces the chance of sending credentials to an LLM provider, but it cannot guarantee that every secret is detected. Keep secrets out of prompts, source files, logs, and command output whenever possible.
 
+Interactive `confirm` mode intentionally displays complete detected values in its confirmation dialog so you can make an informed decision. Values are escaped to prevent control and invisible formatting characters from altering the dialog. They remain hidden from ordinary status output; debug logging is the separate, explicitly enabled exception. Terminal scrollback or capture can retain TUI dialogs, and RPC clients receive the complete dialog contents, which may be retained in protocol or client logs.
+
 ## Scan points
 
 The extension scans at two boundaries:

@@ -15,14 +15,20 @@ Pi Secret Scanner starts in `redact` mode with entropy detection enabled. Settin
 
 ## Modes
 
-| Mode      | Behavior                                                                                           |
-| --------- | -------------------------------------------------------------------------------------------------- |
-| `redact`  | Replaces detected values before sending them to the model. This is the default.                    |
-| `warn`    | Records findings but leaves content unchanged. Detected secrets can reach the provider.            |
-| `confirm` | Asks whether to redact newly detected values. Without an interactive UI, it redacts automatically. |
-| `off`     | Disables all scanning.                                                                             |
+| Mode      | Behavior                                                                                                          |
+| --------- | ----------------------------------------------------------------------------------------------------------------- |
+| `redact`  | Replaces detected values before sending them to the model. This is the default.                                   |
+| `warn`    | Records findings but leaves content unchanged. Detected secrets can reach the provider.                           |
+| `confirm` | Shows exact detected values and asks whether to redact them. Without an interactive UI, it redacts automatically. |
+| `off`     | Disables all scanning.                                                                                            |
 
 Changing the mode or entropy setting clears the in-memory scan cache.
+
+### Confirmation dialogs
+
+Interactive confirmation dialogs intentionally show each complete detected value so you can decide whether it is actually secret. Duplicate values are grouped with an occurrence count. Newlines, invisible formatting characters, and terminal control characters are escaped so they cannot alter the dialog layout.
+
+These values appear only in the explicit confirmation dialog. Ordinary status output remains value-free. The TUI dialog is also terminal output, so scrollback, terminal capture, and session recording can retain the displayed credentials. In RPC mode, the complete dialog is sent to the connected client and may appear in protocol or client logs. Without a UI, confirm mode redacts automatically and displays nothing.
 
 ## Visual feedback
 
