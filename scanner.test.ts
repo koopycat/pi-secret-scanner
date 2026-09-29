@@ -269,6 +269,40 @@ describe("findHighEntropyStrings", () => {
 		}
 	});
 
+	it("suppresses safe shapes on single-line documents within the bounded context window", () => {
+		// The safe-shape checks inspect a bounded neighborhood of each candidate
+		// (see CONTEXT_BEFORE/CONTEXT_AFTER) so that single-line documents such as
+		// minified bundles stay linear. A digest a few hundred characters after
+		// its key on one line must still be suppressed.
+		const sha64 = gitSha64();
+		const filler = Buffer.from("filler ".repeat(120)).toString("base64");
+		expect(findHighEntropyStrings(`digest: ${filler} sha256:${sha64}`)).toHaveLength(0);
+		expect(findHighEntropyStrings(`image: alpine@sha256:${sha64}`)).toHaveLength(0);
+	});
+
+	it("flags a digest whose credential guard lies outside the bounded context window", () => {
+		// Documented compromise: a credential assignment more than ~1024
+		// characters earlier on the same line no longer overrides safe-shape
+		// suppression. Realistic secret contexts are adjacent to their values.
+		const sha64 = gitSha64();
+		const filler = Buffer.from("filler ".repeat(600)).toString("base64");
+		expect(findHighEntropyStrings(`token=x ${filler} sha256:${sha64}`)).toHaveLength(0);
+	});
+
+	it("scans large single-line documents in bounded time", () => {
+		// Regression guard for the quadratic scan cost: candidate extraction used
+		// to rescan the whole line prefix per candidate, taking ~24s on a 400KB
+		// single-line document. The bound is generous to stay CI-stable while
+		// still catching an O(n²) blowup.
+		const values = Array.from({ length: 2000 }, (_, i) =>
+			Buffer.from(`value number ${i} with some more prose text to decode`).toString("base64"),
+		);
+		const text = JSON.stringify(Object.fromEntries(values.map((v, i) => [`key${i}`, v])));
+		const started = performance.now();
+		expect(scanText(text, { useEntropy: true }).findings).toHaveLength(2000);
+		expect(performance.now() - started).toBeLessThan(5000);
+	});
+
 	it("detects malformed action pins without flagging the public repository slug", () => {
 		const sha40 = gitSha40();
 		// Truncated action pin: the @OID no longer matches the canonical pin shape,

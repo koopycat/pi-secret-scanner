@@ -144,15 +144,61 @@ const LOWER_HEX_40 = /^[0-9a-f]{40}$/;
 const LOWER_HEX_40_OR_64 = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const LOWER_HEX_64 = /^[0-9a-f]{64}$/;
 
-// Nearest assignment key immediately before the candidate, including quoted
-// JSON/YAML keys such as `"token": "`.
-const KEY_BEFORE = /["']?([A-Za-z0-9_\-.]{1,40})["']?\s*[=:]\s*["']?$/;
 const BASIC_AUTH_BEFORE = /\b(?:proxy-)?authorization\s*:\s*basic[ \t]+["']?$/i;
 const ASSIGNMENT_KEYS_BEFORE = /(?:^|[\s,;{[("'?&])([A-Za-z0-9_\-.]{1,40})["']?\s*[=:]\s*["']?/g;
 
+// Per-character predicates for the manual backward key scan in `keyBefore`.
+// A regex equivalent to the old `KEY_BEFORE` pattern is orders of magnitude
+// slower here: without a `^` anchor it retries every start position of the
+// 256-char context window per candidate, which dominated scans of files with
+// many value-like strings (measured ~14s on a 164KB JSON document).
+
+function isWsChar(code: number): boolean {
+	if (code === 32 || code === 9 || code === 10 || code === 13 || code === 11 || code === 12) return true;
+	// Match the JS `\s` class for non-ASCII whitespace (NBSP, ideographic, …).
+	return code > 127 && /\s/.test(String.fromCharCode(code));
+}
+
+function isQuoteChar(code: number): boolean {
+	return code === 34 || code === 39; // " or '
+}
+
+function isKeyChar(code: number): boolean {
+	return (
+		(code >= 97 && code <= 122) || // a-z
+		(code >= 65 && code <= 90) || // A-Z
+		(code >= 48 && code <= 57) || // 0-9
+		code === 95 ||
+		code === 45 ||
+		code === 46 // _ - .
+	);
+}
+
+/**
+ * Nearest assignment key immediately before the candidate, including quoted
+ * JSON/YAML keys such as `"token": "`. Equivalent to matching
+ * /["']?([A-Za-z0-9_\-.]{1,40})["']?\s*[=:]\s*["']?$/ against `before`, but
+ * parsed backwards from the end in O(key length) instead of searching the
+ * whole window.
+ */
 function keyBefore(before: string): string | null {
-	const m = KEY_BEFORE.exec(before);
-	return m?.[1] ?? null;
+	let i = before.length;
+	// Trailing quote that opens the value: `token="…`.
+	if (i > 0 && isQuoteChar(before.charCodeAt(i - 1))) i--;
+	// Whitespace between the separator and the value quote.
+	while (i > 0 && isWsChar(before.charCodeAt(i - 1))) i--;
+	// The separator itself.
+	const sep = i > 0 ? before.charCodeAt(i - 1) : 0;
+	if (sep !== 61 /* = */ && sep !== 58 /* : */) return null;
+	i--;
+	// Whitespace between the key and the separator: `token = …`.
+	while (i > 0 && isWsChar(before.charCodeAt(i - 1))) i--;
+	// Closing quote of a JSON/YAML key: `"token": …`.
+	if (i > 0 && isQuoteChar(before.charCodeAt(i - 1))) i--;
+	// The key itself: 1-40 characters of [A-Za-z0-9_\-.].
+	const end = i;
+	while (i > 0 && end - i < 40 && isKeyChar(before.charCodeAt(i - 1))) i--;
+	return i === end ? null : before.slice(i, end);
 }
 
 function isCredentialKey(key: string): boolean {
@@ -185,12 +231,40 @@ function isGitOidForKey(candidate: string, key: string): boolean {
 }
 
 function isContextuallySafe(candidate: string, text: string, start: number, end: number): boolean {
-	const lineStart = text.lastIndexOf("\n", start - 1) + 1;
-	const lineEnd = text.indexOf("\n", end);
-	const line = text.slice(lineStart, lineEnd === -1 ? text.length : lineEnd);
-	const relStart = start - lineStart;
-	const relEnd = end - lineStart;
-	const before = line.slice(0, relStart);
+	// The safe-shape checks only ever inspect a bounded neighborhood of the
+	// candidate: an assignment key, a digest prefix, or a `uses:` pin that ends
+	// at the candidate. Unbounded line scans are quadratic on single-line files
+	// such as minified bundles (measured ~24s for a 400KB bundle before this
+	// bounding). Two compromises, both far outside realistic secret contexts:
+	// credential assignments more than CONTEXT_BEFORE chars earlier no longer
+	// force detection, and `uses:`/build-URL suppression is skipped when the
+	// line extends beyond the window (a `$`-anchored match on a truncated line
+	// could wrongly exempt a value).
+	const winStart = Math.max(0, start - CONTEXT_BEFORE);
+	const beforeWindow = text.slice(winStart, start);
+	const nlBack = beforeWindow.lastIndexOf("\n");
+	const lineStart = nlBack !== -1 ? winStart + nlBack + 1 : start <= CONTEXT_BEFORE ? 0 : -1;
+	const before = nlBack !== -1 ? beforeWindow.slice(nlBack + 1) : beforeWindow;
+
+	const afterWindow = text.slice(end, end + CONTEXT_AFTER + 1);
+	const nlFwd = afterWindow.indexOf("\n");
+	let lineEnd: number;
+	let lineComplete: boolean;
+	if (nlFwd !== -1) {
+		lineEnd = end + nlFwd;
+		lineComplete = true;
+	} else if (end + CONTEXT_AFTER + 1 >= text.length) {
+		lineEnd = text.length;
+		lineComplete = true;
+	} else {
+		lineEnd = end + CONTEXT_AFTER;
+		lineComplete = false;
+	}
+
+	const lo = lineStart === -1 ? winStart : lineStart;
+	const line = text.slice(lo, lineEnd);
+	const relStart = start - lo;
+	const relEnd = end - lo;
 	const key = keyBefore(before);
 
 	// Check every assignment before the candidate so nested syntax such as
@@ -217,37 +291,41 @@ function isContextuallySafe(candidate: string, text: string, start: number, end:
 	}
 
 	// Pinned GitHub Action refs: `uses: owner/repo@<oid>`, optionally quoted
-	// and followed by a YAML comment.
-	const uses = /\buses:\s*(["']?)[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@([0-9a-f]{40}|[0-9a-f]{64})\1\s*(?:#.*)?$/.exec(
-		line,
-	);
-	if (uses) {
-		const repo = /([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)@/.exec(uses[0])?.[1] ?? "";
-		const oid = uses[2] ?? "";
-		const repoStart = uses.index + uses[0].indexOf(repo);
-		const oidStart = uses.index + uses[0].lastIndexOf(oid);
-		if (relStart === repoStart && relEnd === repoStart + repo.length) return true;
-		if (relStart === oidStart && relEnd === oidStart + oid.length) return true;
-	}
-
-	// Strict docker-desktop dashboard build URLs. Exempt only complete path
-	// segments, not arbitrary candidates embedded inside the URL.
-	const buildUrl =
-		/(?:^|\s)(docker-desktop:\/\/dashboard\/build\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/([A-Za-z0-9_-]+))\s*$/.exec(
+	// and followed by a YAML comment. Only matched against a complete line; on
+	// a truncated line the `$` anchor could exempt values the full line would
+	// not.
+	if (lineComplete) {
+		const uses = /\buses:\s*(["']?)[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@([0-9a-f]{40}|[0-9a-f]{64})\1\s*(?:#.*)?$/.exec(
 			line,
 		);
-	if (buildUrl) {
-		const url = buildUrl[1] ?? "";
-		const urlStart = buildUrl.index + buildUrl[0].indexOf(url);
-		for (const segment of buildUrl.slice(2)) {
-			if (!segment) continue;
-			const segmentStart = buildUrl.index + buildUrl[0].indexOf(segment);
-			if (relStart === segmentStart && relEnd === segmentStart + segment.length) return true;
+		if (uses) {
+			const repo = /([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)@/.exec(uses[0])?.[1] ?? "";
+			const oid = uses[2] ?? "";
+			const repoStart = uses.index + uses[0].indexOf(repo);
+			const oidStart = uses.index + uses[0].lastIndexOf(oid);
+			if (relStart === repoStart && relEnd === repoStart + repo.length) return true;
+			if (relStart === oidStart && relEnd === oidStart + oid.length) return true;
 		}
-		// The extractor may return the URL tail as one candidate. This exact tail
-		// is safe only when it spans the complete path of a canonical build URL.
-		const tailStart = urlStart + "docker-desktop:".length;
-		if (relStart === tailStart && relEnd === urlStart + url.length) return true;
+
+		// Strict docker-desktop dashboard build URLs. Exempt only complete path
+		// segments, not arbitrary candidates embedded inside the URL.
+		const buildUrl =
+			/(?:^|\s)(docker-desktop:\/\/dashboard\/build\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/([A-Za-z0-9_-]+))\s*$/.exec(
+				line,
+			);
+		if (buildUrl) {
+			const url = buildUrl[1] ?? "";
+			const urlStart = buildUrl.index + buildUrl[0].indexOf(url);
+			for (const segment of buildUrl.slice(2)) {
+				if (!segment) continue;
+				const segmentStart = buildUrl.index + buildUrl[0].indexOf(segment);
+				if (relStart === segmentStart && relEnd === segmentStart + segment.length) return true;
+			}
+			// The extractor may return the URL tail as one candidate. This exact tail
+			// is safe only when it spans the complete path of a canonical build URL.
+			const tailStart = urlStart + "docker-desktop:".length;
+			if (relStart === tailStart && relEnd === urlStart + url.length) return true;
+		}
 	}
 
 	return false;
@@ -257,8 +335,13 @@ function isContextuallySafe(candidate: string, text: string, start: number, end:
 
 const MAX_BASE64_DECODE_LENGTH = 256 * 1024;
 const MAX_DECODED_INSPECTION_LENGTH = 16 * 1024;
+// Bounded context windows for the safe-shape checks in `isContextuallySafe`.
+const CONTEXT_BEFORE = 1024;
+const CONTEXT_AFTER = 1024;
 const STANDARD_BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 const URLSAFE_BASE64 = /^[A-Za-z0-9_-]+={0,2}$/;
+
+const UTF8_STRICT = new TextDecoder("utf-8", { fatal: true });
 
 interface DecodedBase64 {
 	bytes: Buffer;
@@ -314,9 +397,11 @@ function hasRecognizedBinarySignature(bytes: Buffer): boolean {
 }
 
 function decodeMostlyPrintableText(bytes: Buffer): string | null {
+	// Reused across calls: TextDecoder construction is expensive and decode()
+	// is stateless when not streaming.
 	let decoded: string;
 	try {
-		decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		decoded = UTF8_STRICT.decode(bytes);
 	} catch {
 		return null;
 	}
@@ -335,9 +420,17 @@ function decodeMostlyPrintableText(bytes: Buffer): string | null {
 }
 
 function containsRecognizedCredential(text: string): boolean {
+	// Note: this deliberately always uses the built-in SECRET_PATTERNS set. It
+	// runs inside entropy classification, which has no access to ScanOptions,
+	// so disabled rules and whitelists do not suppress encoded-credential
+	// redaction. That asymmetry is intentional: an encoded secret should still
+	// be caught even when the plaintext rule is disabled.
+	//
 	// Keep provider-pattern inspection bounded even when an attacker supplies a
 	// large, highly compressible printable payload. Inspect both ends because
 	// encoded configuration commonly has credentials near either boundary.
+	// Known limitation: for decoded text longer than 2x the window size a
+	// credential straddling the boundary between the two windows is missed.
 	const windows =
 		text.length <= MAX_DECODED_INSPECTION_LENGTH
 			? [text]
@@ -430,6 +523,7 @@ const STRUCTURED_CANDIDATE = /(?<=[@:/])([A-Za-z0-9=_\-]{20,})(?![A-Za-z0-9=_\-]
 
 function extractCandidates(text: string): Array<{ value: string; start: number; end: number }> {
 	const candidates: Array<{ value: string; start: number; end: number }> = [];
+	const seen = new Set<string>();
 	for (const extractor of [ASSIGNED_CANDIDATE, BASIC_AUTH_CANDIDATE, QUOTED_CANDIDATE, STRUCTURED_CANDIDATE]) {
 		extractor.lastIndex = 0;
 		let match: RegExpExecArray | null;
@@ -440,7 +534,11 @@ function extractCandidates(text: string): Array<{ value: string; start: number; 
 			if (offset < 0) continue;
 			const start = match.index + offset;
 			const end = start + value.length;
-			if (!candidates.some((candidate) => candidate.start === start && candidate.end === end)) {
+			// Span-keyed dedup instead of a linear `some()` scan: candidate counts
+			// reach the thousands on large documents and the scan was quadratic.
+			const key = `${start}:${end}`;
+			if (!seen.has(key)) {
+				seen.add(key);
 				candidates.push({ value, start, end });
 			}
 		}
@@ -455,6 +553,16 @@ export function findHighEntropyStrings(text: string): EntropyFinding[] {
 		const charSet = detectCharSet(candidate);
 		if (!charSet) continue;
 
+		// Cheap rejections first: length and entropy gates run before the
+		// expensive Base64 classification (decode + pattern scan) so that
+		// candidates that could never become findings do not pay for it.
+		const minLen = MIN_CANDIDATE_LENGTH[charSet];
+		if (candidate.length < minLen) continue;
+
+		const entropy = shannonEntropy(candidate);
+		const threshold = ENTROPY_THRESHOLDS[charSet];
+		if (entropy < threshold) continue;
+
 		const classification =
 			charSet === "base64"
 				? classifyBase64(candidate, text, start)
@@ -463,32 +571,18 @@ export function findHighEntropyStrings(text: string): EntropyFinding[] {
 		// Safe shapes suppress ambiguous candidates. They are overridden only by
 		// an immediate credential/authentication context, not merely because the
 		// decoded bytes happen to resemble a credential.
-		if (
-			isSafe(candidate) &&
-			classification.context !== "credential-assignment" &&
-			classification.context !== "basic-auth" &&
-			classification.context !== "encoded-credential"
-		)
-			continue;
-
-		const minLen = MIN_CANDIDATE_LENGTH[charSet];
-		if (candidate.length < minLen) continue;
+		if (isSafe(candidate) && classification.context === "ambiguous") continue;
 
 		if (isContextuallySafe(candidate, text, start, end)) continue;
 
-		const entropy = shannonEntropy(candidate);
-		const threshold = ENTROPY_THRESHOLDS[charSet];
-
-		if (entropy >= threshold) {
-			findings.push({
-				value: candidate,
-				start,
-				end,
-				entropy: parseFloat(entropy.toFixed(2)),
-				charSet,
-				...classification,
-			});
-		}
+		findings.push({
+			value: candidate,
+			start,
+			end,
+			entropy: parseFloat(entropy.toFixed(2)),
+			charSet,
+			...classification,
+		});
 	}
 
 	return findings;
