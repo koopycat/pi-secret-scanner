@@ -35,7 +35,7 @@ High entropy is evidence, not proof, so ambiguous candidates are handled conserv
 
 - High-entropy hexadecimal or mixed values in generic metadata fields such as `id`, `digest`, `checksum`, `hash`, and `fingerprint` can be reported without replacement.
 - Pure-hex filesystem segments are ignored.
-- Hash-like URL path segments and standalone hexadecimal values of MD5 length or longer in free prose can be reported without replacement.
+- Hash-like URL path segments and standalone hexadecimal values of MD5 length or longer in free prose can be reported without replacement, except canonical lowercase 40-character Git SHA-1 object IDs, which are ignored.
 - Ambiguous Base64 candidates can be reported without replacement.
 - Base64 is automatically redacted when it appears in an immediate credential assignment, a recognized authentication context such as `Authorization: Basic`, or canonically decodes to content containing a named secret, private key, or credential assignment.
 - Canonically decoded prose, source, JSON, and recognized binary file signatures are not automatically redacted.
@@ -46,12 +46,12 @@ Credential-bearing context takes priority over these public-identifier safeguard
 
 The scanner ignores narrowly recognized public identifiers in their expected contexts:
 
-- lowercase 40-character SHA-1 and 64-character SHA-256 Git object IDs in explicit Git metadata positions, including GitHub Action pins;
+- lowercase 40-character SHA-1 Git object IDs by canonical shape, including bare command output, and lowercase 64-character SHA-256 Git object IDs in explicit Git metadata positions;
 - canonical Docker/OCI `sha256:<64 lowercase hex>` digests;
 - lowercase 64-character Docker image or container IDs under explicit ID labels; and
 - canonical `docker-desktop://dashboard/build/<builder>/<target>/<id>` links.
 
-Outside those contexts, the same values remain detectable. Credential assignments such as `token=<40-hex>` and `secret=sha256:<64-hex>` are still scanned. Named credential rules are unaffected.
+Canonical lowercase 40-character SHA-1 values are ignored even without Git-specific context because Git commands commonly print bare object IDs. Lowercase 64-character SHA-256 values require explicit Git context. Credential assignments such as `token=<40-hex>` and `secret=sha256:<64-hex>` always take precedence and remain detectable. Named credential rules are unaffected.
 
 ## Intentionally unmodified data
 
