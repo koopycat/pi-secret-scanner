@@ -2,6 +2,18 @@
 
 Scans outgoing provider payloads and text returned by the `read` and `bash` tools for credentials. The default mode replaces detected values before they are sent to the model.
 
+## Installation
+
+```bash
+pi install git:github.com/koopycat/pi-secret-scanner@v0.2.0   # pinned git tag (recommended)
+```
+
+To uninstall:
+
+```bash
+pi remove git:github.com/koopycat/pi-secret-scanner@v0.2.0
+```
+
 ## Visual feedback
 
 The footer normally shows the scanner mode and cumulative redaction count. Whenever one or more values are actually replaced, it changes for five seconds to a prominent warning such as:
