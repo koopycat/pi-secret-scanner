@@ -18,13 +18,17 @@ export interface SecretPattern {
 }
 
 const SOURCE_REFERENCE = /^[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*$/;
-const SOURCE_EXPRESSION_PREFIX = /^[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*(?:\(|\?\?|&&|\|\|)/;
+const SOURCE_EXPRESSION_PREFIX =
+	/^(?:`)?[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*(?:\(|\?\?|&&|\|\||=\$\{)/;
+const MASKED_SECRET = /^[A-Za-z0-9_-]*\*{4,}$/;
 
 export const SECRET_PATTERNS: SecretPattern[] = [
 	// ── PEM private keys ──────────────────────────────────────────────────────
 	{
 		name: "Private Key (PEM)",
-		regex: /-----BEGIN\s(?:RSA |EC |DSA |OPENSSH |)?PRIVATE KEY-----[\s\S]*?-----END\s(?:RSA |EC |DSA |OPENSSH |)?PRIVATE KEY-----/g,
+		// Require real or escaped newlines around the body. This avoids matching
+		// arrays of source-code string fragments that merely spell both markers.
+		regex: /-----BEGIN\s(?:RSA |EC |DSA |OPENSSH |)?PRIVATE KEY-----(?:\r?\n|\\r?\\n)[A-Za-z0-9+/=\s\\]+?(?:\r?\n|\\r?\\n)-----END\s(?:RSA |EC |DSA |OPENSSH |)?PRIVATE KEY-----/g,
 		confidence: "high",
 	},
 
@@ -210,6 +214,9 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 			// Truncated source expressions: the assignment matcher stops at whitespace
 			// and quotes, so calls and nullish/logical expressions end here.
 			SOURCE_EXPRESSION_PREFIX.test(value) ||
+			// Masked values printed by CLIs are evidence that a secret was withheld,
+			// not credentials that can leak to a provider.
+			MASKED_SECRET.test(value) ||
 			// Bare camelCase/PascalCase identifiers: local variables, object props.
 			/^[A-Za-z_$][A-Za-z0-9_$]*[A-Z][A-Za-z0-9_$]*$/.test(value),
 	},
@@ -217,7 +224,7 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 	// ── URLs with embedded credentials ────────────────────────────────────────
 	{
 		name: "URL with Embedded Credentials",
-		regex: /[a-zA-Z][a-zA-Z0-9+\-.]*:\/\/[^@\s]+:[^@\s]{3,}@[^\s]+/g,
+		regex: /[a-zA-Z][a-zA-Z0-9+\-.]*:\/\/[^@\s"'`]+:[^@\s"'`]{3,}@[^\s"'`]+/g,
 		confidence: "high",
 	},
 ];

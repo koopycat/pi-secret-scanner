@@ -427,8 +427,10 @@ describe("SECRET_PATTERNS", () => {
 		mustDetect("JSON Web Token", jwtToken());
 	});
 
-	it("detects URL credentials", () => {
-		mustDetect("URL with Embedded Credentials", urlWithCreds());
+	it("detects URL credentials without consuming surrounding quotes", () => {
+		const pattern = findPat("URL with Embedded Credentials");
+		pattern.regex.lastIndex = 0;
+		expect(pattern.regex.exec(`DATABASE_URL="${urlWithCreds()}"`)?.[0]).toBe(urlWithCreds());
 	});
 
 	it("detects Anthropic key", () => {
@@ -452,6 +454,8 @@ describe("SECRET_PATTERNS", () => {
 		mustNotDetect("Generic Password Assignment", "apiKey: kiloToken,");
 		mustNotDetect("Generic Password Assignment", "apiKey: credential?.key ?? await resolveCredential()");
 		mustNotDetect("Generic Password Assignment", 'token: githubPat("fixture")');
+		mustNotDetect("Generic Password Assignment", "token: `token=${sha64}`");
+		mustNotDetect("Generic Password Assignment", "Token: gho_************************************");
 		mustNotDetect("Generic Password Assignment", "credential: kiloToken,");
 		mustNotDetect(
 			"Generic Password Assignment",
@@ -696,6 +700,12 @@ describe("scanText", () => {
 		const pem = ["-----BEGIN PRIVATE KEY-----", "abc1234567890", "-----END PRIVATE KEY-----"].join("\n");
 		const result = scanText(`before\n${pem}\nKEEP THIS`, { useEntropy: false });
 		expect(result.redacted).toBe("before\n[REDACTED:PRIVATE_KEY_(PEM)]\nKEEP THIS");
+	});
+
+	it("does not mistake source-code PEM fragments for a private key", () => {
+		const source =
+			'const privateKey = ["-----BEGIN PRIVATE KEY-----", "abc1234567890", "-----END PRIVATE KEY-----"].join("\\n");';
+		expect(scanText(source, { useEntropy: false }).findings).toHaveLength(0);
 	});
 
 	it("is idempotent", () => {
