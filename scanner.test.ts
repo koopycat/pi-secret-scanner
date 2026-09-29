@@ -766,6 +766,23 @@ describe("scanText", () => {
 		expect(scanText(`token=/var/lib/docker/overlay2/${gitSha64()}/diff`).redactions).toHaveLength(1);
 	});
 
+	it("reports identifiers embedded in URL paths without replacing them", () => {
+		// URL segments must neither be exempted (a URL-embedded secret would be
+		// silently missed) nor redacted (replacing a segment corrupts the link).
+		const texts = [
+			`see https://github.com/owner/repo/commit/${gitSha40()} for details`,
+			`fetched https://cdn.example.com/builds/${gitSha64()}.tgz`,
+			`docs: [release notes](https://github.com/owner/repo/commit/${gitSha40()})`,
+		];
+		for (const text of texts) {
+			const result = scanText(text);
+			expect(result.findings.length).toBeGreaterThan(0);
+			expect(result.findings.every((finding) => finding.action === "report")).toBe(true);
+			expect(result.redactions).toHaveLength(0);
+			expect(result.redacted).toBe(text);
+		}
+	});
+
 	it("suppresses the same OID only in the safe occurrence (occurrence-local)", () => {
 		const sha = gitSha40();
 		const text = `commit_sha: ${sha}\nUNKNOWN=${sha}`;

@@ -237,6 +237,21 @@ function isGitOidForKey(candidate: string, key: string): boolean {
 	return false;
 }
 
+const URL_SCHEME_PREFIX = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+
+// Whether the token containing the candidate starts with a URL scheme
+// (https://, ftp://, docker-desktop://, …), which distinguishes URL paths
+// from filesystem paths. Token start is the last delimiter before the
+// candidate; the bounded window may truncate very long tokens, in which case
+// detection fails closed and the candidate keeps its default classification.
+function startsWithUrlScheme(before: string): boolean {
+	const delimiters = /[\s"'([<=,;]/g;
+	let cut = -1;
+	let match: RegExpExecArray | null;
+	while ((match = delimiters.exec(before)) !== null) cut = match.index;
+	return URL_SCHEME_PREFIX.test(cut === -1 ? before : before.slice(cut + 1));
+}
+
 function classifyOpaqueEntropy(text: string, start: number): Pick<EntropyFinding, "action" | "context"> {
 	const before = text.slice(Math.max(0, start - 256), start);
 	const key = keyBefore(before);
@@ -246,11 +261,17 @@ function classifyOpaqueEntropy(text: string, start: number): Pick<EntropyFinding
 		hasCredentialAssignment(before) ||
 		(nestedCredential?.[1] !== undefined && isCredentialKey(nestedCredential[1]));
 	const genericHexContext = key !== null && GENERIC_HEX_CONTEXT_KEYS.has(normalizeContextKey(key));
+	// Identifiers embedded in URL path segments are reported, not replaced:
+	// replacing a URL segment corrupts the link, and public URL identifiers
+	// (commit URLs, artifact digests) vastly outnumber URL-embedded secrets.
+	const urlPathContext = /[/\\]$/.test(before) && startsWithUrlScheme(before);
 	return credentialContext
 		? { action: "redact", context: "credential-assignment" }
 		: genericHexContext
 			? { action: "report", context: "ambiguous" }
-			: { action: "redact", context: "ambiguous" };
+			: urlPathContext
+				? { action: "report", context: "ambiguous" }
+				: { action: "redact", context: "ambiguous" };
 }
 
 function isContextuallySafe(candidate: string, text: string, start: number, end: number): boolean {
@@ -309,13 +330,15 @@ function isContextuallySafe(candidate: string, text: string, start: number, end:
 	if (LOWER_HEX_64.test(candidate) && /(?:^|[@:\s])sha256:\s*$/.test(before)) return true;
 
 	// Hex-named filesystem segments are content addresses (git object files,
-	// Docker overlay layers, content-addressed build caches, temp dirs), not
-	// secrets. Only pure lowercase hex qualifies — alphanumeric URL-path
-	// segments (webhook IDs, …) stay detectable — and this sits below the
-	// credential guard, so `token=/…/<hex>` still redacts.
+	// Docker overlay layers, content-addressed caches, temp dirs), not secrets.
+	// Only pure lowercase hex qualifies, and only outside URL tokens — URL-path
+	// identifiers fall through to a report-only classification instead, so a
+	// link is never corrupted and a URL-embedded secret stays visible. This
+	// sits below the credential guard: `token=/…/<hex>` still redacts.
 	if (
 		/^[0-9a-f]{20,}$/.test(candidate) &&
 		/[/\\]$/.test(before) &&
+		!startsWithUrlScheme(before) &&
 		(end >= text.length || /^[\s/\\."'),;:\]}]/.test(text[end] ?? ""))
 	) {
 		return true;
