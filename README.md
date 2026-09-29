@@ -51,7 +51,11 @@ Values are logged only when redaction is applied. `warn` mode and rejected confi
 
 Provider-specific regular expressions run first. Optional Shannon-entropy detection catches unknown credentials. It deliberately ignores a small set of intrinsically safe shapes such as UUIDs, timestamps, placeholders, and filesystem paths.
 
+Ambiguous high-entropy HEX/MIXED values in generic metadata fields such as `id`, `digest`, `checksum`, `hash`, and `fingerprint` are reported but not replaced. Credential-bearing contexts still redact them. This avoids replacing public identifiers, source fixtures, and explanatory prose while preserving the credential guard.
+
 High-entropy Base64 is treated as an identification signal, not proof of a secret. Ambiguous candidates appear in findings but are left unchanged. Automatic Base64 redaction requires an immediate credential assignment (for example `token=` or `api_key=`), a recognized authentication context such as `Authorization: Basic`, or canonical Base64/Base64url whose decoded printable content contains a named provider secret, private key, or credential assignment. Canonically decoded prose/source/JSON and recognized binary file signatures are not automatically redacted. Named provider regex findings retain precedence.
+
+During each provider request, the extension sanitizes the conversation context before the provider payload is assembled. It caches sanitized text by an in-memory SHA-256 fingerprint, so unchanged historical text is reused rather than rescanned. The cache is bounded and cleared when the session, mode, entropy setting, or whitelist changes. Provider-native opaque signatures (`thinkingSignature`, `textSignature`, `thoughtSignature`) and image bytes are passed through unchanged; they are not prompt text and altering them can invalidate provider replay data.
 
 Some hash-like values are safe in recognizable public metadata contexts and are ignored there:
 

@@ -39,6 +39,7 @@
  *   the extension falls back to redact automatically.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -47,7 +48,7 @@ import { parse as parseToml } from "smol-toml";
 import { SECRET_PATTERNS } from "./patterns.ts";
 import { countByType, formatFindings, scanObject, scanText } from "./scanner.ts";
 
-import type { ScanOptions } from "./scanner.ts";
+import type { ScanCacheEntry, ScanOptions } from "./scanner.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -90,6 +91,19 @@ let redactionFlashTimer: ReturnType<typeof setTimeout> | undefined;
 
 const REDACTION_FLASH_MS = 5_000;
 let whitelist: ResolvedWhitelist | null = null;
+
+// This cache is process-local only. Hashing avoids retaining original
+// transcript text as Map keys, and bounded eviction prevents unbounded growth.
+const TEXT_CACHE_LIMIT = 4096;
+const textCache = new Map<string, ScanCacheEntry>();
+
+function clearScanCaches() {
+	textCache.clear();
+}
+
+function cacheKey(value: string): string {
+	return createHash("sha256").update(value).digest("hex");
+}
 
 function resetStats() {
 	stats = { scans: 0, findingsTotal: 0, redactions: 0, byType: {} };
@@ -228,6 +242,11 @@ function buildScanOptions(): ScanOptions {
 		whitelist: whitelist?.values,
 		whitelistRegexes: whitelist?.valueRegexes,
 		disabledRules: whitelist?.disabledRules,
+		textCache,
+		textCacheKey: (text) => cacheKey(text),
+		textCacheMaxEntries: TEXT_CACHE_LIMIT,
+		cacheRead: mode !== "confirm",
+		cacheWrite: mode !== "confirm",
 	};
 }
 
@@ -236,6 +255,23 @@ function buildScanOptions(): ScanOptions {
 export default function (pi: ExtensionAPI) {
 	// Only the UI surface the helpers need; every pi context is structurally compatible.
 	type StatusContext = Pick<ExtensionContext, "ui" | "hasUI">;
+
+	function accountFindings(findings: ReturnType<typeof scanText>["findings"]): void {
+		if (findings.length === 0) return;
+		stats.findingsTotal += findings.length;
+		mergeTypeCounts(stats.byType, countByType(findings));
+	}
+
+	function accountRedactions(
+		ctx: StatusContext,
+		findings: ReturnType<typeof scanText>["redactions"],
+		location: string,
+	): void {
+		if (findings.length === 0) return;
+		stats.redactions += findings.length;
+		logRedactions(location, findings);
+		flashRedaction(ctx, findings.length, location);
+	}
 
 	function updateStatus(ctx: StatusContext) {
 		if (!ctx.hasUI) return;
@@ -283,6 +319,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", (_event, ctx) => {
+		clearScanCaches();
 		whitelist = loadWhitelist(ctx.cwd);
 		redactionFlash = null;
 		if (redactionFlashTimer) clearTimeout(redactionFlashTimer);
@@ -291,10 +328,31 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		clearScanCaches();
 		if (redactionFlashTimer) clearTimeout(redactionFlashTimer);
 		redactionFlashTimer = undefined;
 		redactionFlash = null;
 		if (ctx.hasUI) ctx.ui.setStatus("secret-scanner", undefined);
+	});
+
+	// ── Hook: context ────────────────────────────────────────────────────────
+
+	pi.on("context", (event, ctx) => {
+		if (mode === "off" || mode === "confirm") return;
+
+		stats.scans++;
+		const result = scanObject(event.messages, buildScanOptions());
+		if (result.freshFindings.length > 0) {
+			accountFindings(result.freshFindings);
+			updateStatus(ctx);
+		}
+		if (mode === "redact") {
+			accountRedactions(ctx, result.freshRedactions, "context");
+			if (result.hasFindings) return { messages: result.redactedObject as typeof event.messages };
+		} else if (result.hasFindings) {
+			// Warn mode observes the full context but leaves it untouched.
+			return;
+		}
 	});
 
 	// ── Hook: before_provider_request ───────────────────────────────────────
@@ -307,8 +365,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (!result.hasFindings) return;
 
-		stats.findingsTotal += result.findings.length;
-		mergeTypeCounts(stats.byType, countByType(result.findings));
+		accountFindings(result.freshFindings);
 
 		updateStatus(ctx);
 
@@ -316,9 +373,19 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		if (mode === "redact" && result.freshRedactions.length === 0) {
+			return result.redactedObject;
+		}
+
+		if (mode === "confirm" && ctx.hasUI && result.freshRedactions.length === 0) {
+			// Cached findings are already accounted for and should not repeatedly
+			// prompt the user. The sanitized payload can still be returned below.
+			return result.redactedObject;
+		}
+
 		if (mode === "confirm" && ctx.hasUI) {
-			const redactionSummary = formatFindings(result.redactions);
-			const redactionCount = result.redactions.length;
+			const redactionSummary = formatFindings(result.freshRedactions);
+			const redactionCount = result.freshRedactions.length;
 			const redactionLabel = redactionCount === 1 ? "secret" : "secrets";
 			const ok = await ctx.ui.confirm(
 				`🔐 Secret Scanner: ${redactionCount} potential ${redactionLabel} detected`,
@@ -329,9 +396,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		stats.redactions += result.redactions.length;
-		logRedactions("provider request", result.redactions);
-		flashRedaction(ctx, result.redactions.length, "provider request");
+		accountRedactions(ctx, result.freshRedactions, "provider request");
 		return result.redactedObject;
 	});
 
@@ -367,11 +432,11 @@ export default function (pi: ExtensionAPI) {
 
 			if (result.findings.length > 0) {
 				hasFindings = true;
-				allFindings.push(...result.findings);
+				if (!result.fromCache) allFindings.push(...result.findings);
 
 				if (mode === "warn") {
 					newContent.push(item);
-				} else if (mode === "confirm" && ctx.hasUI && result.redactions.length > 0) {
+				} else if (mode === "confirm" && ctx.hasUI && !result.fromCache && result.redactions.length > 0) {
 					const summary = formatFindings(result.redactions);
 					const count = result.redactions.length;
 					const label = count === 1 ? "secret" : "secrets";
@@ -380,15 +445,16 @@ export default function (pi: ExtensionAPI) {
 						`Redact from file contents before adding to context?\n\n${summary}`,
 					);
 					if (ok) {
-						redactionCount += result.redactions.length;
+						redactionCount = redactionCount + result.redactions.length;
 						logRedactions(`${event.toolName} tool result`, result.redactions);
 						newContent.push({ ...item, text: result.redacted });
 					} else {
 						newContent.push(item);
 					}
 				} else {
-					redactionCount += result.redactions.length;
-					logRedactions(`${event.toolName} tool result`, result.redactions);
+					const freshRedactions = result.fromCache ? [] : result.redactions;
+					redactionCount = redactionCount + freshRedactions.length;
+					logRedactions(`${event.toolName} tool result`, freshRedactions);
 					newContent.push({ ...item, text: result.redacted });
 				}
 			} else {
@@ -398,8 +464,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (!hasFindings) return;
 
-		stats.findingsTotal += allFindings.length;
-		mergeTypeCounts(stats.byType, countByType(allFindings));
+		accountFindings(allFindings);
 
 		updateStatus(ctx);
 
@@ -421,6 +486,7 @@ export default function (pi: ExtensionAPI) {
 			const arg = args.trim().toLowerCase();
 
 			if (arg === "off" || arg === "warn" || arg === "redact" || arg === "confirm") {
+				clearScanCaches();
 				mode = arg;
 				updateStatus(ctx);
 				ctx.ui.notify(`Secret scanner mode set to: ${mode}`, mode === "off" ? "warning" : "info");
@@ -428,6 +494,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (arg === "entropy on") {
+				clearScanCaches();
 				useEntropy = true;
 				updateStatus(ctx);
 				ctx.ui.notify("Entropy-based detection: ON", "info");
@@ -435,6 +502,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (arg === "entropy off") {
+				clearScanCaches();
 				useEntropy = false;
 				updateStatus(ctx);
 				ctx.ui.notify("Entropy-based detection: OFF", "info");
@@ -471,6 +539,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (arg === "reload") {
+				clearScanCaches();
 				whitelist = loadWhitelist(ctx.cwd);
 				updateStatus(ctx);
 				const wlMsg = whitelist

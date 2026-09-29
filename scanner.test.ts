@@ -165,6 +165,15 @@ describe("findHighEntropyStrings", () => {
 		expect(findHighEntropyStrings(`token=${sri}`)).toHaveLength(1);
 	});
 
+	it("reports ambiguous HEX metadata without redacting it", () => {
+		const sha40 = gitSha40();
+		for (const text of [`id: ${sha40}`, `digest: ${sha40}`, `checksum=${sha40}`]) {
+			const result = findHighEntropyStrings(text);
+			expect(result).toHaveLength(1);
+			expect(result[0]).toMatchObject({ action: "report", context: "ambiguous" });
+		}
+	});
+
 	it("ignores canonical Git OIDs in public metadata contexts", () => {
 		const sha40 = gitSha40();
 		const sha64 = gitSha64();
@@ -706,6 +715,21 @@ describe("scanText", () => {
 		expect(twilio).toBeDefined();
 	});
 
+	it("reports ambiguous HEX in generic metadata contexts without redacting it", () => {
+		const sha = gitSha40();
+		for (const text of [`id=${sha}`, `digest: ${sha}`, `checksum: ${sha}`]) {
+			const result = scanText(text);
+			expect(result.findings).toHaveLength(1);
+			expect(result.findings[0]).toMatchObject({
+				type: "High-Entropy HEX",
+				action: "report",
+				context: "ambiguous",
+			});
+			expect(result.redactions).toHaveLength(0);
+			expect(result.redacted).toBe(text);
+		}
+	});
+
 	it("suppresses the same OID only in the safe occurrence (occurrence-local)", () => {
 		const sha = gitSha40();
 		const text = `commit_sha: ${sha}\nUNKNOWN=${sha}`;
@@ -717,6 +741,22 @@ describe("scanText", () => {
 		expect(result.findings[0]?.value).toBe(sha);
 		expect(result.findings[0]?.type).toBe("High-Entropy HEX");
 		expect(result.findings[0]?.charSet).toBe("hex");
+	});
+
+	it("does not scan provider signature fields as prompt text", () => {
+		const secret = githubPat();
+		const payload = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "visible reasoning", thinkingSignature: secret },
+				{ type: "text", text: "visible answer", textSignature: secret },
+				{ type: "toolCall", name: "read", arguments: {}, thoughtSignature: secret },
+			],
+		};
+		const result = scanObject(payload);
+		expect(result.findings).toHaveLength(0);
+		expect(result.redactions).toHaveLength(0);
+		expect(result.redactedObject).toEqual(payload);
 	});
 
 	it("leaves multi-line canonical artifact text unchanged", () => {
@@ -784,6 +824,21 @@ describe("scanObject", () => {
 		expect(String(redacted.db)).toContain("[REDACTED:");
 		expect(String(redacted.db)).not.toContain("secretpassword");
 		expect(redacted.other).toBe("safe");
+	});
+
+	it("reuses sanitized text without reporting cached findings as fresh", () => {
+		const cache = new Map();
+		const options = { textCache: cache, textCacheKey: (text: string) => text };
+		const obj = { prompt: `token=${githubPat()}` };
+
+		const first = scanObject(obj, options);
+		const second = scanObject(obj, options);
+
+		expect(first.freshRedactions).toHaveLength(1);
+		expect(second.redactions).toHaveLength(1);
+		expect(second.freshRedactions).toHaveLength(0);
+		expect(second.redactedObject).toEqual(first.redactedObject);
+		expect(second.redactions[0]?.value).toBe("");
 	});
 
 	it("handles null/undefined/numbers gracefully", () => {

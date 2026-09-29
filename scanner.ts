@@ -42,6 +42,14 @@ export interface ScanResult {
 	redactions: Finding[];
 	/** Text with secret values replaced by [REDACTED:TYPE] placeholders. */
 	redacted: string;
+	/** True when the result came from an ephemeral caller-owned scan cache. */
+	fromCache?: boolean;
+}
+
+export interface ScanCacheEntry {
+	redacted: string;
+	findings: Finding[];
+	redactions: Finding[];
 }
 
 export interface ScanOptions {
@@ -53,6 +61,18 @@ export interface ScanOptions {
 	whitelistRegexes?: RegExp[];
 	/** Rule names to disable entirely (e.g. "Generic Password Assignment"). */
 	disabledRules?: Set<string>;
+	/** Skip scanning a string field in a structured payload. */
+	skipString?: (key: string, value: string, parent: Record<string, unknown>) => boolean;
+	/** Ephemeral cache of sanitized text, owned and invalidated by the extension. */
+	textCache?: Map<string, ScanCacheEntry>;
+	/** Force a scan while refreshing the cache, rather than reusing a cached entry. */
+	cacheRead?: boolean;
+	/** Do not write a scan result to the cache (used when a user may decline redaction). */
+	cacheWrite?: boolean;
+	/** Hashes text before using it as a cache key, avoiding raw transcript keys. */
+	textCacheKey?: (text: string) => string;
+	/** Maximum number of entries retained in the text cache. */
+	textCacheMaxEntries?: number;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -77,6 +97,20 @@ function isWhitelisted(value: string, whitelist?: Set<string>, regexes?: RegExp[
 type ExecWithIndices = RegExpExecArray & { indices?: Array<[number, number] | undefined> };
 
 export function scanText(text: string, options?: ScanOptions): ScanResult {
+	const textKey = options?.textCacheKey?.(text) ?? text;
+	const cached = options?.cacheRead === false ? undefined : options?.textCache?.get(textKey);
+	if (cached) {
+		// Refresh insertion order for the bounded LRU-like cache.
+		options?.textCache?.delete(textKey);
+		options?.textCache?.set(textKey, cached);
+		return {
+			findings: cached.findings,
+			redactions: cached.redactions,
+			redacted: cached.redacted,
+			fromCache: true,
+		};
+	}
+
 	const patterns = options?.patterns ?? SECRET_PATTERNS;
 	const disabled = options?.disabledRules;
 	const findings: Finding[] = [];
@@ -180,7 +214,27 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 	}
 	redacted += text.slice(cursor);
 
-	return { findings, redactions: selected.map((part) => part.finding), redacted };
+	const result: ScanResult = { findings, redactions: selected.map((part) => part.finding), redacted };
+	if (options?.textCache && options.cacheWrite !== false) {
+		// Do not retain the original secret values in the cache. Cached findings
+		// still carry their type and context for accounting/UI, while a cache miss
+		// is the only place where the exact value is available for optional debug
+		// logging.
+		const cachedFindings = result.findings.map((finding) => ({ ...finding, value: "" }));
+		const cachedRedactions = result.redactions.map((finding) => ({ ...finding, value: "" }));
+		options.textCache.set(textKey, {
+			findings: cachedFindings,
+			redactions: cachedRedactions,
+			redacted: result.redacted,
+		});
+		const limit = options.textCacheMaxEntries ?? Number.POSITIVE_INFINITY;
+		while (options.textCache.size > limit) {
+			const oldest = options.textCache.keys().next().value;
+			if (oldest === undefined) break;
+			options.textCache.delete(oldest);
+		}
+	}
+	return result;
 }
 
 // ── Object scanning (for provider payloads) ───────────────────────────────────
@@ -213,13 +267,31 @@ function normalizeKey(key: string): string {
 		.toLowerCase();
 }
 
+function isOpaqueProviderField(key: string, parent: Record<string, unknown>): boolean {
+	const normalized = normalizeKey(key);
+	const type = parent.type;
+
+	// Provider-native signatures and image bytes are opaque replay data, not
+	// prompt text. Restrict this to their typed content shapes so a user field
+	// merely named `thinkingSignature` cannot bypass scanning.
+	if (normalized === "thinking_signature") return type === "thinking";
+	if (normalized === "text_signature") return type === "text";
+	if (normalized === "thought_signature") return type === "toolCall";
+	if (normalized === "data") return type === "image" && typeof parent.mimeType === "string";
+	return false;
+}
+
 export interface ObjectScanResult {
 	findings: Finding[];
 	/** Findings whose values were actually replaced. */
 	redactions: Finding[];
+	/** Findings discovered during this scan, excluding cache hits. */
+	freshFindings: Finding[];
+	/** Redactions discovered during this scan, excluding cache hits. */
+	freshRedactions: Finding[];
 	/** Deep clone of the object with secret string values replaced. */
 	redactedObject: unknown;
-	/** True if any findings were made. */
+	/** True if any findings were made, including cached findings. */
 	hasFindings: boolean;
 }
 
@@ -230,12 +302,18 @@ export interface ObjectScanResult {
 export function scanObject(obj: unknown, options?: ScanOptions): ObjectScanResult {
 	const allFindings: Finding[] = [];
 	const allRedactions: Finding[] = [];
+	const freshFindings: Finding[] = [];
+	const freshRedactions: Finding[] = [];
 
 	function walk(node: unknown): unknown {
 		if (typeof node === "string") {
 			const result = scanText(node, options);
 			allFindings.push(...result.findings);
 			allRedactions.push(...result.redactions);
+			if (!result.fromCache) {
+				freshFindings.push(...result.findings);
+				freshRedactions.push(...result.redactions);
+			}
 			return result.redacted;
 		}
 
@@ -246,9 +324,20 @@ export function scanObject(obj: unknown, options?: ScanOptions): ObjectScanResul
 		if (node !== null && typeof node === "object") {
 			const out: Record<string, unknown> = {};
 			for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-				// String values under known path keys are file-system paths, not
-				// secrets; pass them through untouched. Everything else is scanned.
-				out[key] = typeof value === "string" && PATH_KEYS.has(normalizeKey(key)) ? value : walk(value);
+				const normalizedKey = normalizeKey(key);
+				if (
+					typeof value === "string" &&
+					(PATH_KEYS.has(normalizedKey) ||
+						isOpaqueProviderField(key, node as Record<string, unknown>) ||
+						options?.skipString?.(key, value, node as Record<string, unknown>))
+				) {
+					// String values under known path keys are file-system paths, not
+					// secrets; opaque provider metadata is passed through unchanged by
+					// the caller's typed skipString hook.
+					out[key] = value;
+				} else {
+					out[key] = walk(value);
+				}
 			}
 			return out;
 		}
@@ -261,6 +350,8 @@ export function scanObject(obj: unknown, options?: ScanOptions): ObjectScanResul
 	return {
 		findings: allFindings,
 		redactions: allRedactions,
+		freshFindings,
+		freshRedactions,
 		redactedObject,
 		hasFindings: allFindings.length > 0,
 	};

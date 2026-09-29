@@ -127,6 +127,16 @@ const CREDENTIAL_KEY_SUFFIXES = [
 	"signing_key",
 ];
 
+const GENERIC_HEX_CONTEXT_KEYS = new Set([
+	"id",
+	"hash",
+	"digest",
+	"checksum",
+	"signature",
+	"fingerprint",
+	"identifier",
+]);
+
 const GIT_OID_CONTEXT_KEYS = new Set([
 	"commit",
 	"commit_sha",
@@ -201,12 +211,16 @@ function keyBefore(before: string): string | null {
 	return i === end ? null : before.slice(i, end);
 }
 
-function isCredentialKey(key: string): boolean {
-	const normalized = key
+function normalizeContextKey(key: string): string {
+	return key
 		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
 		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "_");
+}
+
+function isCredentialKey(key: string): boolean {
+	const normalized = normalizeContextKey(key);
 	if (CREDENTIAL_KEYS.has(normalized)) return true;
 	if (CREDENTIAL_KEY_SUFFIXES.some((suffix) => normalized === suffix || normalized.endsWith(`_${suffix}`)))
 		return true;
@@ -228,6 +242,22 @@ function isGitOidForKey(candidate: string, key: string): boolean {
 	if (normalized === "sha1") return LOWER_HEX_40.test(candidate);
 	if (normalized === "sha256") return LOWER_HEX_64.test(candidate);
 	return false;
+}
+
+function classifyOpaqueEntropy(text: string, start: number): Pick<EntropyFinding, "action" | "context"> {
+	const before = text.slice(Math.max(0, start - 256), start);
+	const key = keyBefore(before);
+	const nestedCredential = /(?:^|[\s,;{[(]"?)([A-Za-z0-9_.-]{1,40})["']?\s*[=:]\s*sha(?:1|256):\s*$/i.exec(before);
+	const credentialContext =
+		(key !== null && isCredentialKey(key)) ||
+		hasCredentialAssignment(before) ||
+		(nestedCredential?.[1] !== undefined && isCredentialKey(nestedCredential[1]));
+	const genericHexContext = key !== null && GENERIC_HEX_CONTEXT_KEYS.has(normalizeContextKey(key));
+	return credentialContext
+		? { action: "redact", context: "credential-assignment" }
+		: genericHexContext
+			? { action: "report", context: "ambiguous" }
+			: { action: "redact", context: "ambiguous" };
 }
 
 function isContextuallySafe(candidate: string, text: string, start: number, end: number): boolean {
@@ -437,12 +467,15 @@ function containsRecognizedCredential(text: string): boolean {
 			: [text.slice(0, MAX_DECODED_INSPECTION_LENGTH / 2), text.slice(-MAX_DECODED_INSPECTION_LENGTH / 2)];
 	for (const inspected of windows) {
 		for (const pattern of SECRET_PATTERNS) {
-			pattern.regex.lastIndex = 0;
+			// Use a private regex instance: this classification can run while the
+			// outer scanner is using the same named pattern objects, and a shared
+			// lastIndex would make the result dependent on traversal order.
+			const regex = new RegExp(pattern.regex.source, pattern.regex.flags);
 			let match: RegExpExecArray | null;
-			while ((match = pattern.regex.exec(inspected)) !== null) {
+			while ((match = regex.exec(inspected)) !== null) {
 				const value = pattern.secretGroup === undefined ? match[0] : match[pattern.secretGroup];
 				if (value && !pattern.rejectValue?.(value)) return true;
-				if (match[0].length === 0) pattern.regex.lastIndex++;
+				if (match[0].length === 0) regex.lastIndex++;
 			}
 		}
 	}
@@ -564,9 +597,7 @@ export function findHighEntropyStrings(text: string): EntropyFinding[] {
 		if (entropy < threshold) continue;
 
 		const classification =
-			charSet === "base64"
-				? classifyBase64(candidate, text, start)
-				: ({ action: "redact", context: "ambiguous" } as const);
+			charSet === "base64" ? classifyBase64(candidate, text, start) : classifyOpaqueEntropy(text, start);
 
 		// Safe shapes suppress ambiguous candidates. They are overridden only by
 		// an immediate credential/authentication context, not merely because the
