@@ -1169,3 +1169,78 @@ describe("false-positive fixes keep credential detection", () => {
 		}
 	});
 });
+
+describe("scan options", () => {
+	it("skips values matching an allowlist regex, including stateful global regexes", () => {
+		const whitelistRegexes = [/^ghp_abcdef/g];
+		for (let i = 0; i < 2; i++) {
+			expect(scanText(`t=${githubPat()}`, { useEntropy: false, whitelistRegexes }).findings).toEqual([]);
+		}
+		expect(scanText(`t=${awsKey()}`, { useEntropy: false, whitelistRegexes }).findings).toHaveLength(1);
+	});
+
+	it("skips values by fingerprint without needing their plaintext in the allowlist", () => {
+		const hash = (value: string) => `h:${value.length}:${value.slice(-4)}`;
+		const result = scanText(githubPat(), {
+			useEntropy: false,
+			whitelistHashes: new Set([hash(githubPat())]),
+			hashWhitelistValue: hash,
+		});
+		expect(result.findings).toEqual([]);
+	});
+
+	it("evicts the least recently used entries from a bounded cache", () => {
+		const textCache = new Map();
+		const options = { textCache, textCacheMaxEntries: 2, useEntropy: false };
+		scanText("a", options);
+		scanText("b", options);
+		scanText("a", options); // refresh "a"
+		scanText("c", options);
+
+		expect([...textCache.keys()]).toEqual(["a", "c"]);
+	});
+
+	it("never retains secret values in the cache and never lets callers mutate it", () => {
+		const textCache = new Map();
+		const options = { textCache, useEntropy: false };
+		const first = scanText(githubPat(), options);
+		const cached = scanText(githubPat(), options);
+
+		expect(first.redactions[0]?.value).toBe(githubPat());
+		expect(cached.fromCache).toBe(true);
+		expect(cached.redactions[0]?.value).toBe("");
+		cached.redactions[0]!.type = "mutated";
+		expect(scanText(githubPat(), options).redactions[0]?.type).not.toBe("mutated");
+	});
+
+	it("caches only clean results with cacheWrite: clean", () => {
+		const textCache = new Map();
+		scanText(githubPat(), { textCache, cacheWrite: "clean", useEntropy: false });
+		scanText("nothing here", { textCache, cacheWrite: "clean", useEntropy: false });
+
+		expect([...textCache.keys()]).toEqual(["nothing here"]);
+	});
+});
+
+describe("entropy details in summaries", () => {
+	const entropyFinding = {
+		type: "High-Entropy MIXED",
+		source: "entropy" as const,
+		value: "Zx9wQp7/Vm4Kd2Rt8",
+		confidence: "low" as const,
+		entropy: 3.91,
+		charSet: "mixed",
+	};
+
+	it("shows entropy and charset without the value in ordinary summaries", () => {
+		const summary = formatFindings([entropyFinding]);
+		expect(summary).toBe("  🟢 High-Entropy MIXED (entropy: 3.9, charset: mixed)");
+	});
+
+	it("shows entropy, occurrence counts, and the escaped value in confirmation dialogs", () => {
+		const summary = formatConfirmFindings([entropyFinding, { ...entropyFinding }]);
+		expect(summary).toBe(
+			'🟢 High-Entropy MIXED (entropy: 3.9, charset: mixed) — 2 occurrences\n  Value: "Zx9wQp7/Vm4Kd2Rt8"',
+		);
+	});
+});

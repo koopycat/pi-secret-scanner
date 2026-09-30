@@ -23,6 +23,7 @@
 	"scripts": {
 		"test": "vitest --run",
 		"test:watch": "vitest",
+		"test:coverage": "vitest --run --coverage",
 		"typecheck": "tsc --noEmit",
 		"lint": "eslint .",
 		"lint:fix": "eslint --fix .",
@@ -41,6 +42,7 @@
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "^0.87.1",
 		"@types/node": "^26.0.0",
+		"@vitest/coverage-v8": "3.2.7",
 		"eslint": "^10.6.0",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-import-x": "^4.17.1",

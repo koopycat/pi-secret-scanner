@@ -15,6 +15,6 @@
 		"resolveJsonModule": true,
 		"types": ["node"]
 	},
-	"include": ["*.ts", "fixtures/**/*.ts", "scripts/**/*.ts"],
+	"include": ["*.ts", "fixtures/**/*.ts", "scripts/**/*.ts", "testing/**/*.ts"],
 	"exclude": ["node_modules"]
 }

@@ -31,6 +31,8 @@ jobs:
                   cache: pnpm
             - run: pnpm install --frozen-lockfile
             - run: pnpm check
+            - run: pnpm test:coverage
+              if: matrix.node == 24
 
     # The critical compatibility job: run the extension inside a REAL pi session
     # (deterministic fake provider — no LLM API key needed) against both the

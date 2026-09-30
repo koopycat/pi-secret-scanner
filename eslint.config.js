@@ -97,6 +97,7 @@ export default tseslint.config(
 			"n/hashbang": "off",
 			// Target Node.js 26 (project runtime)
 			"n/no-unsupported-features/node-builtins": ["error", { version: ">=26.0.0" }],
+			"n/no-unsupported-features/es-syntax": ["error", { version: ">=26.0.0" }],
 			// Off: pi packages resolve at runtime via global symlinks; tsx handles resolution.
 			"n/no-missing-import": "off",
 
@@ -141,7 +142,7 @@ export default tseslint.config(
 	// ---- Test file exceptions ----
 	// Tests need relaxed type-safety: stubs, partial mocks, and `as any` assertions are normal.
 	{
-		files: ["**/*.test.ts", "**/*.spec.ts", "**/__tests__/**", "vitest.config.ts"],
+		files: ["**/*.test.ts", "**/*.spec.ts", "**/__tests__/**", "testing/**/*.ts", "vitest.config.ts"],
 		rules: {
 			"@typescript-eslint/explicit-function-return-type": "off",
 			"@typescript-eslint/no-non-null-assertion": "off",

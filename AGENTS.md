@@ -10,6 +10,7 @@ the machine. Extracted from the `pi_extensions` monorepo; this repo is the singl
 pnpm install        # Install dependencies (pnpm only, never npm/yarn)
 pnpm check          # Prettier + ESLint (zero warnings) + typecheck + tests
 pnpm test           # Run vitest
+pnpm test:coverage  # Vitest with v8 coverage and enforced thresholds (CI, Node 24)
 pnpm smoke          # End-to-end: real pi session + deterministic fake provider
 pnpm fp-report <p>  # False-positive report over real files (Node >= 22.18)
 pnpm typecheck      # tsc --noEmit
@@ -39,24 +40,45 @@ pi is installed as a devDependency so everything is self-contained.
 
 ## Package layout
 
-- `index.ts` — extension entry point (registered via the `pi` manifest in `package.json`).
+Extension (wiring and I/O):
+
+- `index.ts` — entry point (the only file in the `pi` manifest). `createSecretScanner(state)` builds the
+  factory; the default export shares one `ScannerState` per process on purpose: pi re-runs the factory on
+  `/new`, resume, and fork with the same module, so mode and counters persist; `/reload` re-imports it.
+- `hooks.ts` — pi event hooks: where content is scanned, redacted, and guarded.
+- `commands.ts` — `/secret-scanner` subcommands and the status text.
+- `confirm.ts` — confirm-mode dialogs and decision handling.
+- `feedback.ts` — footer status, redaction flash, counters, debug log, config problems.
+- `state.ts` — all mutable state in one object, plus `buildScanOptions` (cache policy lives here).
+- `config.ts` — loads and merges `.gitleaks.toml`, `.secret-scanner.json`, `.secret-scanner.local.json`;
+  never throws, returns errors.
+- `local-store.ts` — persists project fingerprints (lock, atomic rename, `.git/info/exclude`).
+- `placeholder-guard.ts` — pure check behind the `edit`/`write` block.
+
+Detection (pure, no pi imports):
+
 - `scanner.ts` — core scan/redact logic and overlap resolution.
 - `patterns.ts` — curated named secret patterns (AWS, GitHub, Stripe, …).
 - `entropy.ts` — Shannon-entropy fallback with contextual public-identifier exclusions
-  (Git OIDs, Docker digests/IDs, GitHub Action pins, Docker Desktop build links).
-- `scanner.test.ts` — vitest suite; builds synthetic secrets by concatenation so the
-  source itself never matches.
+  (Git OIDs, Docker digests/IDs, SRI, Nix store paths, GitHub Action pins, Docker Desktop build links).
 - `lockfiles.ts` — lockfile names whose `read` results skip entropy detection.
+
+Tests and tooling:
+
+- `*.test.ts` next to each module. `hooks.test.ts`, `commands.test.ts`, and `config.test.ts` drive the
+  extension through `testing/harness.ts` (fake `ExtensionAPI`/context, fresh state and temp dirs per test).
+- Synthetic secrets are built by concatenation so test sources never match the scanner.
 - `fixtures/fake-secrets.txt` — intentionally invalid synthetic values for manual testing.
 - `fixtures/benign/` — synthetic false-positive corpus; `scanner.test.ts` asserts nothing in it is replaced.
   Keep these files byte-exact (they are in `.prettierignore`; minified JSON is intentional).
 - `scripts/fp-report.ts` — `pnpm fp-report <path>` summarizes what would be replaced/reported in real files.
-- `vitest.config.ts` — resolves `@earendil-works/*` through pi's own node_modules.
+- `vitest.config.ts` — resolves `@earendil-works/*` through pi's own node_modules; coverage thresholds.
 
 ## Invariants
 
 - Runtime dependency: only `smol-toml`. Everything from `@earendil-works/*` stays a peer dependency.
 - The `pi` manifest lists exactly `./index.ts`; test files and fixtures are never loaded by pi.
+- No module-level mutable state outside `index.ts`'s shared `ScannerState`; pass state explicitly.
 - Credential-bearing keys (`token`, `secret`, `api-key`, …) always win over public-identifier
   exclusions — never weaken the guard in `entropy.ts`.
 - Named provider rules take precedence over entropy findings in `scanner.ts` overlap resolution.
