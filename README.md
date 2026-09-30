@@ -12,9 +12,10 @@ A [Pi coding agent](https://github.com/earendil-works/pi) extension that detects
 
 Pi Secret Scanner:
 
-- scans text returned by Pi's `read` and `bash` tools before it enters the conversation;
-- scans the final provider request before it is sent to the LLM; and
-- replaces detected values with typed placeholders such as `[REDACTED:AWS_ACCESS_KEY_ID]`.
+- scans text returned by every Pi tool before it enters the conversation;
+- scans the final provider request before it is sent to the LLM;
+- replaces detected values with typed placeholders such as `[REDACTED:AWS_ACCESS_KEY_ID]`; and
+- tells the model what placeholders mean and blocks `edit`/`write` calls that would copy a placeholder over the real value on disk.
 
 Detection combines rules for known credential formats with entropy-based detection for unknown secrets. Entropy detection is enabled by default.
 
@@ -82,7 +83,7 @@ See [Configuration](docs/configuration.md) for all fields, precedence rules, and
 ## Security boundaries
 
 - Detection can produce false positives and false negatives.
-- Only `read` and `bash` results are scanned immediately; text from other tools is still inspected at the final provider boundary.
+- Tool results are scanned immediately; entropy detection is skipped for lockfiles read with `read`, while named rules still apply.
 - File-path fields, image bytes, and provider replay signatures are intentionally left unchanged.
 - `warn` mode does **not** prevent secrets from being sent.
 - Allowlisted paths skip immediate `read` result scanning, but the final provider request is still scanned.

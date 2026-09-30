@@ -55,8 +55,10 @@ export interface ScanCacheEntry {
 export interface ScanOptions {
 	useEntropy?: boolean;
 	patterns?: typeof SECRET_PATTERNS;
-	/** Exact secret values to skip (gitleaks "stopwords" equivalent). */
+	/** Exact secret values to skip. */
 	whitelist?: Set<string>;
+	/** Lowercase substrings; a value containing one is skipped (gitleaks stopwords). */
+	whitelistSubstrings?: readonly string[];
 	/** Regex patterns -- if a secret value matches, it's skipped. */
 	whitelistRegexes?: RegExp[];
 	/** SHA-256 fingerprints of values to skip without retaining their plaintext. */
@@ -71,8 +73,11 @@ export interface ScanOptions {
 	textCache?: Map<string, ScanCacheEntry>;
 	/** When false, bypass cache reads and scan fresh (the result still refreshes the entry). */
 	cacheRead?: boolean;
-	/** When false, keep the scan result out of the cache (used when a user may decline redaction). */
-	cacheWrite?: boolean;
+	/**
+	 * When false, keep the scan result out of the cache. "clean" caches only
+	 * results without redactions (used while a user may still decline one).
+	 */
+	cacheWrite?: boolean | "clean";
 	/** Hashes text before using it as a cache key, avoiding raw transcript keys. */
 	textCacheKey?: (text: string) => string;
 	/** Maximum number of entries retained in the text cache. */
@@ -81,24 +86,24 @@ export interface ScanOptions {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function placeholder(type: string): string {
+/** The placeholder that replaces a finding of the given type. */
+export function placeholderFor(type: string): string {
 	return `[REDACTED:${type.toUpperCase().replace(/\s+/g, "_")}]`;
 }
 
-function isWhitelisted(
-	value: string,
-	whitelist?: Set<string>,
-	regexes?: RegExp[],
-	hashes?: Set<string>,
-	hashValue?: (value: string) => string,
-): boolean {
-	if (whitelist?.has(value)) return true;
-	if (hashes && hashValue && hashes.has(hashValue(value))) return true;
-	if (regexes) {
-		for (const re of regexes) {
-			re.lastIndex = 0;
-			if (re.test(value)) return true;
-		}
+function isWhitelisted(value: string, options?: ScanOptions): boolean {
+	if (!options) return false;
+	if (options.whitelist?.has(value)) return true;
+	if (options.whitelistSubstrings?.length) {
+		const lower = value.toLowerCase();
+		if (options.whitelistSubstrings.some((word) => lower.includes(word))) return true;
+	}
+	if (options.whitelistHashes && options.hashWhitelistValue) {
+		if (options.whitelistHashes.has(options.hashWhitelistValue(value))) return true;
+	}
+	for (const re of options.whitelistRegexes ?? []) {
+		re.lastIndex = 0;
+		if (re.test(value)) return true;
 	}
 	return false;
 }
@@ -165,16 +170,7 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 			const end = start + value.length;
 
 			if (value.startsWith("[REDACTED:") || match[0].includes("[REDACTED:")) continue;
-			if (
-				isWhitelisted(
-					value,
-					options?.whitelist,
-					options?.whitelistRegexes,
-					options?.whitelistHashes,
-					options?.hashWhitelistValue,
-				)
-			)
-				continue;
+			if (isWhitelisted(value, options)) continue;
 
 			const finding: Finding = {
 				type: pattern.name,
@@ -183,23 +179,14 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 				confidence: pattern.confidence,
 			};
 			findings.push(finding);
-			candidates.push({ start, end, placeholder: placeholder(pattern.name), finding });
+			candidates.push({ start, end, placeholder: placeholderFor(pattern.name), finding });
 		}
 	}
 
 	// Phase 2: Entropy detection (optional).
 	if (options?.useEntropy !== false) {
 		for (const ef of findHighEntropyStrings(text)) {
-			if (
-				isWhitelisted(
-					ef.value,
-					options?.whitelist,
-					options?.whitelistRegexes,
-					options?.whitelistHashes,
-					options?.hashWhitelistValue,
-				)
-			)
-				continue;
+			if (isWhitelisted(ef.value, options)) continue;
 			if (candidates.some((part) => ef.start < part.end && part.start < ef.end)) continue;
 
 			const finding: Finding = {
@@ -216,7 +203,7 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 			};
 			findings.push(finding);
 			if (ef.action === "redact") {
-				candidates.push({ start: ef.start, end: ef.end, placeholder: placeholder(finding.type), finding });
+				candidates.push({ start: ef.start, end: ef.end, placeholder: placeholderFor(finding.type), finding });
 			}
 		}
 	}
@@ -246,7 +233,8 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 	redacted += text.slice(cursor);
 
 	const result: ScanResult = { findings, redactions: selected.map((part) => part.finding), redacted };
-	if (options?.textCache && options.cacheWrite !== false) {
+	const writable = options?.cacheWrite === "clean" ? result.redactions.length === 0 : options?.cacheWrite !== false;
+	if (options?.textCache && writable) {
 		// Do not retain the original secret values in the cache. Cached findings
 		// still carry their type and context for accounting/UI, while a cache miss
 		// is the only place where the exact value is available for optional debug

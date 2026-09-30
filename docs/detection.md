@@ -8,12 +8,18 @@ Interactive `confirm` mode intentionally displays complete detected values in it
 
 The extension scans at two boundaries:
 
-1. Text results from Pi's `read` and `bash` tools are inspected before they enter conversation history.
+1. Text results from every Pi tool are inspected before they enter conversation history.
 2. The final provider payload is inspected before it leaves the machine.
 
 In `redact` mode, conversation context is also sanitized before provider payload assembly. A bounded, process-local cache reuses sanitized text based on a SHA-256 fingerprint; original secret values are not retained as cache keys. The cache is cleared when the session, mode, entropy setting, or allowlist changes.
 
-Only `read` and `bash` have immediate tool-result scanning. Text from other tools can still be detected when it reaches the final provider request.
+Lockfiles read with `read` (`pnpm-lock.yaml`, `package-lock.json`, `go.sum`, `flake.lock`, `devenv.lock`, `uv.lock`, `Cargo.lock`, and other `*.lock` files) skip entropy detection because they consist of public integrity hashes. Named credential rules still apply to them.
+
+## Working with placeholders
+
+While `redact` or `confirm` mode is active, the extension appends a short note to the system prompt: placeholders are opaque, must not be guessed, and must not be written into files.
+
+It also guards Pi's `edit` and `write` tools. A call is blocked when its text contains a placeholder that the scanner emitted in this session and the target file does not already contain that exact placeholder text. The block reason tells the model to edit around the redacted lines or ask the user. Without this guard, a model that read a redacted `.env` file could overwrite real values with placeholders. Files that literally contain placeholder text, such as this project's tests and docs, remain editable.
 
 ## Named rules
 

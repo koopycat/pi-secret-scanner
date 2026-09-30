@@ -6,7 +6,8 @@
  *      this is what breaks when a newer pi version changes its extension API),
  *   2. before_provider_request redacts secrets planted in the user prompt,
  *   3. the tool_result hook redacts secrets pi read from disk,
- *   4. no secret value ever reaches the fake "provider".
+ *   4. no secret value ever reaches the fake "provider",
+ *   5. the system prompt explains redaction placeholders to the model.
  *
  * Requires pi (peer/dev dependency) — CI installs a specific pi version and
  * runs this against it, so extension breakage is caught per pi release.
@@ -149,6 +150,11 @@ check(
 	outbound,
 );
 check(!outbound.includes(fakeAwsKey), "file secret never reached the provider", outbound);
+check(
+	outbound.includes("Secret scanner: values shown as [REDACTED:TYPE]"),
+	"before_agent_start added the placeholder note to the system prompt",
+	outbound.slice(0, 2000),
+);
 check(!`${result.stdout}${result.stderr}`.includes(fakeAwsKey), "secret does not leak into pi's own output", "");
 
 if (failures.length > 0) {

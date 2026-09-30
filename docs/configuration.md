@@ -32,7 +32,7 @@ Create `.secret-scanner.json`:
 | `paths`         | Skips immediate `read` tool-result scanning for matching paths. The final provider request is still scanned. |
 | `disable_rules` | Disables named scanner rules. Use this only when their protection is not needed.                             |
 
-Invalid JSON or regular expressions are reported to standard error and leave the scanner without an active allowlist.
+Problems are shown in Pi when the session starts and on `/secret-scanner reload` (standard error without a UI). An invalid regular expression drops only that entry; invalid JSON or TOML drops only that file.
 
 ## Local decisions from confirm mode
 
@@ -55,7 +55,7 @@ Both `[allowlist]` and `[[allowlists]]` are accepted. The supported fields are:
 
 | Gitleaks field | Scanner behavior                            |
 | -------------- | ------------------------------------------- |
-| `stopwords`    | Treated as exact detected values.           |
+| `stopwords`    | Case-insensitive substrings of the value.   |
 | `regexes`      | Applied to detected values.                 |
 | `paths`        | Applied to paths passed to the `read` tool. |
 
@@ -63,4 +63,4 @@ This is allowlist compatibility, not general Gitleaks configuration support. Rul
 
 ## Precedence
 
-A non-empty `.gitleaks.toml` allowlist takes precedence over `.secret-scanner.json`. If `.gitleaks.toml` has no supported allowlist entries, the scanner falls back to `.secret-scanner.json`.
+All sources are merged: `.gitleaks.toml`, `.secret-scanner.json`, and `.secret-scanner.local.json`. A value, path, or rule allowed by any of them is allowed.

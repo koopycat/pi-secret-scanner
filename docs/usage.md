@@ -31,7 +31,7 @@ Interactive confirmation dialogs intentionally show each complete detected value
 Each value offers four choices:
 
 - **Redact** replaces it for the current operation.
-- **Allow once** leaves it unchanged for the current operation and asks again later.
+- **Allow once** leaves it unchanged for the current operation. Re-sending the same message or tool output in later turns reuses the decision; new tool output containing the value asks again.
 - **Allow for this session** remembers an in-memory SHA-256 fingerprint until the session ends.
 - **Always allow in this project** saves only a fingerprint in `.secret-scanner.local.json` and applies it immediately. The plaintext value is not persisted.
 
