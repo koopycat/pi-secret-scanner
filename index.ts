@@ -39,9 +39,20 @@
  *   the extension falls back to redact automatically.
  */
 
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import {
+	appendFileSync,
+	chmodSync,
+	closeSync,
+	existsSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { join, relative } from "node:path";
 
 import { parse as parseToml } from "smol-toml";
 
@@ -64,6 +75,7 @@ interface Stats {
 
 interface WhitelistConfig {
 	values?: string[];
+	value_hashes?: string[];
 	value_regexes?: string[];
 	paths?: string[];
 	disable_rules?: string[];
@@ -71,6 +83,7 @@ interface WhitelistConfig {
 
 interface ResolvedWhitelist {
 	values: Set<string>;
+	valueHashes: Set<string>;
 	valueRegexes: RegExp[];
 	pathRegexes: RegExp[];
 	disabledRules: Set<string>;
@@ -91,6 +104,13 @@ let redactionFlashTimer: ReturnType<typeof setTimeout> | undefined;
 
 const REDACTION_FLASH_MS = 5_000;
 let whitelist: ResolvedWhitelist | null = null;
+let sessionWhitelistHashes = new Set<string>();
+
+const LOCAL_CONFIG_NAME = ".secret-scanner.local.json";
+const CONFIRM_REDACT = "Redact";
+const CONFIRM_ALLOW_ONCE = "Allow once";
+const CONFIRM_ALLOW_SESSION = "Allow for this session";
+const CONFIRM_ALLOW_PROJECT = "Always allow in this project";
 
 // This cache is process-local only. Hashing avoids retaining original
 // transcript text as Map keys, and bounded eviction prevents unbounded growth.
@@ -103,6 +123,10 @@ function clearScanCaches() {
 
 function cacheKey(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
+}
+
+function secretFingerprint(value: string): string {
+	return `sha256:${cacheKey(value)}`;
 }
 
 function resetStats() {
@@ -179,6 +203,7 @@ function loadGitleaksToml(cwd: string): ResolvedWhitelist | null {
 
 		const resolved: ResolvedWhitelist = {
 			values,
+			valueHashes: new Set(),
 			valueRegexes,
 			pathRegexes,
 			disabledRules: new Set(),
@@ -192,8 +217,8 @@ function loadGitleaksToml(cwd: string): ResolvedWhitelist | null {
 	}
 }
 
-function loadSecretScannerJson(cwd: string): ResolvedWhitelist | null {
-	const configPath = join(cwd, ".secret-scanner.json");
+function loadSecretScannerJson(cwd: string, fileName = ".secret-scanner.json"): ResolvedWhitelist | null {
+	const configPath = join(cwd, fileName);
 	if (!existsSync(configPath)) return null;
 
 	try {
@@ -204,6 +229,7 @@ function loadSecretScannerJson(cwd: string): ResolvedWhitelist | null {
 
 		const resolved: ResolvedWhitelist = {
 			values: new Set(wl.values ?? []),
+			valueHashes: new Set(wl.value_hashes ?? []),
 			valueRegexes: (wl.value_regexes ?? []).map((s) => new RegExp(s)),
 			pathRegexes: (wl.paths ?? []).map((s) => new RegExp(s)),
 			disabledRules: new Set(wl.disable_rules ?? []),
@@ -211,6 +237,7 @@ function loadSecretScannerJson(cwd: string): ResolvedWhitelist | null {
 
 		const count =
 			resolved.values.size +
+			resolved.valueHashes.size +
 			resolved.valueRegexes.length +
 			resolved.pathRegexes.length +
 			resolved.disabledRules.size;
@@ -222,8 +249,101 @@ function loadSecretScannerJson(cwd: string): ResolvedWhitelist | null {
 	}
 }
 
+function mergeWhitelists(primary: ResolvedWhitelist | null, local: ResolvedWhitelist | null): ResolvedWhitelist | null {
+	if (!primary) return local;
+	if (!local) return primary;
+	return {
+		values: new Set([...primary.values, ...local.values]),
+		valueHashes: new Set([...primary.valueHashes, ...local.valueHashes]),
+		valueRegexes: [...primary.valueRegexes, ...local.valueRegexes],
+		pathRegexes: [...primary.pathRegexes, ...local.pathRegexes],
+		disabledRules: new Set([...primary.disabledRules, ...local.disabledRules]),
+	};
+}
+
 function loadWhitelist(cwd: string): ResolvedWhitelist | null {
-	return loadGitleaksToml(cwd) ?? loadSecretScannerJson(cwd);
+	const primary = loadGitleaksToml(cwd) ?? loadSecretScannerJson(cwd);
+	return mergeWhitelists(primary, loadSecretScannerJson(cwd, LOCAL_CONFIG_NAME));
+}
+
+function prepareLocalConfigGitExclusion(cwd: string): void {
+	let root: string;
+	try {
+		root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+			cwd,
+			encoding: "utf-8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+	} catch {
+		return; // Non-Git project.
+	}
+
+	const relativeConfigPath = relative(root, join(cwd, LOCAL_CONFIG_NAME)).replaceAll("\\", "/");
+	try {
+		execFileSync("git", ["ls-files", "--error-unmatch", "--", relativeConfigPath], {
+			cwd: root,
+			stdio: "ignore",
+		});
+		throw new Error(`${relativeConfigPath} is already tracked by Git; untrack it before saving local decisions`);
+	} catch (error) {
+		if (error instanceof Error && error.message.includes("is already tracked by Git")) throw error;
+	}
+
+	const excludePath = execFileSync("git", ["rev-parse", "--git-path", "info/exclude"], {
+		cwd: root,
+		encoding: "utf-8",
+		stdio: ["ignore", "pipe", "ignore"],
+	}).trim();
+	if (!excludePath) throw new Error("Git did not return an info/exclude path");
+	const absoluteExcludePath = join(root, excludePath);
+	const pattern = `/${relativeConfigPath}`;
+	const existing = existsSync(absoluteExcludePath) ? readFileSync(absoluteExcludePath, "utf-8") : "";
+	if (!existing.split(/\r?\n/).includes(pattern)) {
+		appendFileSync(
+			absoluteExcludePath,
+			`${existing.length > 0 && !existing.endsWith("\n") ? "\n" : ""}${pattern}\n`,
+		);
+	}
+}
+
+function persistProjectFingerprint(cwd: string, fingerprint: string): void {
+	const configPath = join(cwd, LOCAL_CONFIG_NAME);
+	const lockPath = `${configPath}.lock`;
+	let lockFd: number | undefined;
+	for (let attempt = 0; attempt < 40; attempt++) {
+		try {
+			lockFd = openSync(lockPath, "wx", 0o600);
+			break;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 39) throw error;
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+		}
+	}
+	if (lockFd === undefined) throw new Error("could not acquire local configuration lock");
+
+	const temporaryPath = `${configPath}.tmp-${randomUUID()}`;
+	try {
+		prepareLocalConfigGitExclusion(cwd);
+		let parsed: { whitelist?: WhitelistConfig } = {};
+		if (existsSync(configPath)) {
+			parsed = JSON.parse(readFileSync(configPath, "utf-8")) as { whitelist?: WhitelistConfig };
+		}
+		const hashes = new Set(parsed.whitelist?.value_hashes ?? []);
+		hashes.add(fingerprint);
+		parsed.whitelist = { ...parsed.whitelist, value_hashes: [...hashes].sort() };
+
+		writeFileSync(temporaryPath, `${JSON.stringify(parsed, null, "\t")}\n`, { mode: 0o600, flag: "wx" });
+		renameSync(temporaryPath, configPath);
+		chmodSync(configPath, 0o600);
+	} finally {
+		try {
+			unlinkSync(temporaryPath);
+		} catch {
+			// The temporary file may not exist or may already have been renamed.
+		}
+		closeSync(lockFd);
+		unlinkSync(lockPath);
+	}
 }
 
 function isPathWhitelisted(filePath: string): boolean {
@@ -235,12 +355,18 @@ function isPathWhitelisted(filePath: string): boolean {
 	return false;
 }
 
-function buildScanOptions(): ScanOptions {
+function buildScanOptions(additionalHashes?: ReadonlySet<string>): ScanOptions {
 	return {
 		useEntropy,
 		patterns: SECRET_PATTERNS,
 		whitelist: whitelist?.values,
 		whitelistRegexes: whitelist?.valueRegexes,
+		whitelistHashes: new Set([
+			...(whitelist?.valueHashes ?? []),
+			...sessionWhitelistHashes,
+			...(additionalHashes ?? []),
+		]),
+		hashWhitelistValue: secretFingerprint,
 		disabledRules: whitelist?.disabledRules,
 		textCache,
 		textCacheKey: (text) => cacheKey(text),
@@ -255,6 +381,46 @@ function buildScanOptions(): ScanOptions {
 export default function (pi: ExtensionAPI) {
 	// Only the UI surface the helpers need; every pi context is structurally compatible.
 	type StatusContext = Pick<ExtensionContext, "ui" | "hasUI">;
+
+	async function chooseConfirmActions(
+		findings: ReturnType<typeof scanText>["redactions"],
+		ctx: StatusContext & { cwd: string },
+		location: string,
+	): Promise<Set<string>> {
+		const allowOnce = new Set<string>();
+		const seen = new Set<string>();
+		for (const finding of findings) {
+			const fingerprint = secretFingerprint(finding.value);
+			if (seen.has(fingerprint)) continue;
+			seen.add(fingerprint);
+
+			const summary = formatConfirmFindings([finding]);
+			const choice = await ctx.ui.select(`🔐 Potential secret in ${location}\n\n${summary}`, [
+				CONFIRM_REDACT,
+				CONFIRM_ALLOW_ONCE,
+				CONFIRM_ALLOW_SESSION,
+				CONFIRM_ALLOW_PROJECT,
+			]);
+			if (choice === CONFIRM_ALLOW_ONCE) {
+				allowOnce.add(fingerprint);
+			} else if (choice === CONFIRM_ALLOW_SESSION) {
+				sessionWhitelistHashes.add(fingerprint);
+			} else if (choice === CONFIRM_ALLOW_PROJECT) {
+				try {
+					persistProjectFingerprint(ctx.cwd, fingerprint);
+					whitelist = loadWhitelist(ctx.cwd);
+					ctx.ui.notify(`Saved fingerprint to ${LOCAL_CONFIG_NAME}; plaintext was not stored`, "info");
+				} catch (error) {
+					ctx.ui.notify(
+						`Could not save ${LOCAL_CONFIG_NAME}; keeping the value redacted: ${error instanceof Error ? error.message : String(error)}`,
+						"error",
+					);
+				}
+			}
+			// Escape/cancel returns undefined and therefore fails safe to redaction.
+		}
+		return allowOnce;
+	}
 
 	function accountFindings(findings: ReturnType<typeof scanText>["findings"]): void {
 		if (findings.length === 0) return;
@@ -294,7 +460,7 @@ export default function (pi: ExtensionAPI) {
 		const color = debug ? "warning" : "dim";
 		const redactedInfo = stats.redactions > 0 ? ` • ${stats.redactions} redacted` : "";
 		const wlInfo = whitelist
-			? ` wl:${whitelist.values.size + whitelist.valueRegexes.length + whitelist.disabledRules.size}`
+			? ` wl:${whitelist.values.size + whitelist.valueHashes.size + whitelist.valueRegexes.length + whitelist.disabledRules.size}`
 			: "";
 		ctx.ui.setStatus(
 			"secret-scanner",
@@ -318,8 +484,9 @@ export default function (pi: ExtensionAPI) {
 		redactionFlashTimer.unref();
 	}
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		clearScanCaches();
+		if (event.reason !== "reload") sessionWhitelistHashes = new Set();
 		whitelist = loadWhitelist(ctx.cwd);
 		redactionFlash = null;
 		if (redactionFlashTimer) clearTimeout(redactionFlashTimer);
@@ -329,6 +496,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		clearScanCaches();
+		sessionWhitelistHashes.clear();
 		if (redactionFlashTimer) clearTimeout(redactionFlashTimer);
 		redactionFlashTimer = undefined;
 		redactionFlash = null;
@@ -384,16 +552,10 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (mode === "confirm" && ctx.hasUI) {
-			const redactionSummary = formatConfirmFindings(result.freshRedactions);
-			const redactionCount = result.freshRedactions.length;
-			const redactionLabel = redactionCount === 1 ? "secret" : "secrets";
-			const ok = await ctx.ui.confirm(
-				`🔐 Secret Scanner: ${redactionCount} potential ${redactionLabel} detected`,
-				`Redact before sending to LLM?\n\n${redactionSummary}\n\nThe values above are intentionally disclosed in this confirmation UI so you can decide. Choose "Yes" to redact, "No" to send as-is.`,
-			);
-			if (!ok) {
-				return;
-			}
+			const allowOnce = await chooseConfirmActions(result.freshRedactions, ctx, "provider request");
+			const decided = scanObject(event.payload, buildScanOptions(allowOnce));
+			accountRedactions(ctx, decided.freshRedactions, "provider request");
+			return decided.redactions.length > 0 ? decided.redactedObject : undefined;
 		}
 
 		accountRedactions(ctx, result.freshRedactions, "provider request");
@@ -416,53 +578,38 @@ export default function (pi: ExtensionAPI) {
 
 		stats.scans++;
 
-		const scanOptions = buildScanOptions();
-		let hasFindings = false;
 		let redactionCount = 0;
 		const allFindings: ReturnType<typeof scanText>["findings"] = [];
-		const newContent: typeof contentItems = [];
+		const initialResults = contentItems.map((item) =>
+			item.type === "text" && typeof item.text === "string" ? scanText(item.text, buildScanOptions()) : null,
+		);
+		const operationAllowOnce = new Set<string>();
 
-		for (const item of contentItems) {
-			if (item.type !== "text" || typeof item.text !== "string") {
-				newContent.push(item);
-				continue;
-			}
-
-			const result = scanText(item.text, scanOptions);
-
-			if (result.findings.length > 0) {
-				hasFindings = true;
-				if (!result.fromCache) allFindings.push(...result.findings);
-
-				if (mode === "warn") {
-					newContent.push(item);
-				} else if (mode === "confirm" && ctx.hasUI && !result.fromCache && result.redactions.length > 0) {
-					const summary = formatConfirmFindings(result.redactions);
-					const count = result.redactions.length;
-					const label = count === 1 ? "secret" : "secrets";
-					const ok = await ctx.ui.confirm(
-						`🔐 Secret Scanner: ${count} potential ${label} in ${event.toolName} output`,
-						`Redact before adding this ${event.toolName} output to context?\n\n${summary}\n\nThe values above are intentionally disclosed in this confirmation UI so you can decide.`,
-					);
-					if (ok) {
-						redactionCount = redactionCount + result.redactions.length;
-						logRedactions(`${event.toolName} tool result`, result.redactions);
-						newContent.push({ ...item, text: result.redacted });
-					} else {
-						newContent.push(item);
-					}
-				} else {
-					const freshRedactions = result.fromCache ? [] : result.redactions;
-					redactionCount = redactionCount + freshRedactions.length;
-					logRedactions(`${event.toolName} tool result`, freshRedactions);
-					newContent.push({ ...item, text: result.redacted });
-				}
-			} else {
-				newContent.push(item);
+		if (mode === "confirm" && ctx.hasUI) {
+			const operationRedactions = initialResults.flatMap((result) => result?.redactions ?? []);
+			for (const hash of await chooseConfirmActions(operationRedactions, ctx, `${event.toolName} output`)) {
+				operationAllowOnce.add(hash);
 			}
 		}
 
-		if (!hasFindings) return;
+		const newContent = contentItems.map((item, index) => {
+			const initialResult = initialResults[index];
+			if (!initialResult || initialResult.findings.length === 0) return item;
+
+			if (!initialResult.fromCache) allFindings.push(...initialResult.findings);
+			if (mode === "warn") return item;
+
+			const result =
+				mode === "confirm" && ctx.hasUI && item.type === "text"
+					? scanText(item.text, buildScanOptions(operationAllowOnce))
+					: initialResult;
+			const freshRedactions = result.fromCache ? [] : result.redactions;
+			redactionCount += freshRedactions.length;
+			logRedactions(`${event.toolName} tool result`, freshRedactions);
+			return { ...item, text: result.redacted };
+		});
+
+		if (!initialResults.some((result) => result && result.findings.length > 0)) return;
 
 		accountFindings(allFindings);
 
@@ -543,7 +690,7 @@ export default function (pi: ExtensionAPI) {
 				whitelist = loadWhitelist(ctx.cwd);
 				updateStatus(ctx);
 				const wlMsg = whitelist
-					? `loaded ${whitelist.values.size + whitelist.valueRegexes.length + whitelist.disabledRules.size} entries`
+					? `loaded ${whitelist.values.size + whitelist.valueHashes.size + whitelist.valueRegexes.length + whitelist.disabledRules.size} entries`
 					: "no whitelist found";
 				ctx.ui.notify(`Secret scanner whitelist reloaded: ${wlMsg}`, "info");
 				return;
@@ -560,6 +707,7 @@ export default function (pi: ExtensionAPI) {
 
 			const wlInfo = whitelist
 				? `\n  Values wl:   ${whitelist.values.size}\n` +
+					`  Hash wl:     ${whitelist.valueHashes.size + sessionWhitelistHashes.size}\n` +
 					`  Regex wl:    ${whitelist.valueRegexes.length}\n` +
 					`  Paths wl:    ${whitelist.pathRegexes.length}\n` +
 					`  Rules off:   ${whitelist.disabledRules.size}`

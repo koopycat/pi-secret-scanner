@@ -58,7 +58,7 @@ Redaction is enabled automatically. Run this inside Pi to check the current mode
 /secret-scanner reset
 ```
 
-The Pi footer shows the active mode and briefly highlights newly detected redactions. Modes, counters, and entropy settings are process-local and return to their defaults in a new Pi process.
+The Pi footer shows the active mode and briefly highlights newly detected redactions. Modes, counters, and entropy settings are process-local and return to their defaults in a new Pi process. In `confirm` mode, each value can be redacted, allowed once, allowed for the session, or always allowed in the project. Persistent decisions store only SHA-256 fingerprints in the gitignored `.secret-scanner.local.json` file.
 
 See [Usage](docs/usage.md) for visual feedback, command behavior, and debug logging.
 

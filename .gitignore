@@ -4,3 +4,5 @@ build/
 out/
 package-lock.json
 *.log
+.secret-scanner.local.json
+.secret-scanner.local.json.tmp-*
