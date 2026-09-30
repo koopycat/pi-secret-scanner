@@ -57,11 +57,12 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { parse as parseToml } from "smol-toml";
 
+import { isLockfile } from "./lockfiles.ts";
 import { SECRET_PATTERNS } from "./patterns.ts";
 import { countByType, formatConfirmFindings, placeholderFor, scanObject, scanText } from "./scanner.ts";
 
@@ -142,26 +143,6 @@ const REDACTION_NOTE =
 
 const PLACEHOLDER = /\[REDACTED:[^\]\s]+\]/g;
 
-// Lockfiles are dense with public integrity hashes. Named rules still run on
-// them; only the entropy fallback is skipped for `read` results.
-const LOCKFILE_NAMES = new Set([
-	"pnpm-lock.yaml",
-	"package-lock.json",
-	"npm-shrinkwrap.json",
-	"yarn.lock",
-	"bun.lock",
-	"go.sum",
-	"flake.lock",
-	"devenv.lock",
-	"cargo.lock",
-	"uv.lock",
-	"poetry.lock",
-	"pipfile.lock",
-	"gemfile.lock",
-	"composer.lock",
-	"package.resolved",
-]);
-
 // This cache is process-local only. Hashing avoids retaining original
 // transcript text as Map keys, and bounded eviction prevents unbounded growth.
 const TEXT_CACHE_LIMIT = 4096;
@@ -205,11 +186,6 @@ function logRedactions(location: string, findings: Finding[]): void {
 
 function rememberPlaceholders(findings: Finding[]): void {
 	for (const finding of findings) emittedPlaceholders.add(placeholderFor(finding.type));
-}
-
-function isLockfile(filePath: string): boolean {
-	const name = basename(filePath).toLowerCase();
-	return LOCKFILE_NAMES.has(name) || name.endsWith(".lock");
 }
 
 function resolveToolPath(cwd: string, filePath: string): string {

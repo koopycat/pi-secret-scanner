@@ -11,6 +11,7 @@ pnpm install        # Install dependencies (pnpm only, never npm/yarn)
 pnpm check          # Prettier + ESLint (zero warnings) + typecheck + tests
 pnpm test           # Run vitest
 pnpm smoke          # End-to-end: real pi session + deterministic fake provider
+pnpm fp-report <p>  # False-positive report over real files (Node >= 22.18)
 pnpm typecheck      # tsc --noEmit
 pnpm lint           # ESLint — must pass with zero warnings
 pnpm format         # Prettier write
@@ -45,7 +46,11 @@ pi is installed as a devDependency so everything is self-contained.
   (Git OIDs, Docker digests/IDs, GitHub Action pins, Docker Desktop build links).
 - `scanner.test.ts` — vitest suite; builds synthetic secrets by concatenation so the
   source itself never matches.
+- `lockfiles.ts` — lockfile names whose `read` results skip entropy detection.
 - `fixtures/fake-secrets.txt` — intentionally invalid synthetic values for manual testing.
+- `fixtures/benign/` — synthetic false-positive corpus; `scanner.test.ts` asserts nothing in it is replaced.
+  Keep these files byte-exact (they are in `.prettierignore`; minified JSON is intentional).
+- `scripts/fp-report.ts` — `pnpm fp-report <path>` summarizes what would be replaced/reported in real files.
 - `vitest.config.ts` — resolves `@earendil-works/*` through pi's own node_modules.
 
 ## Invariants
@@ -55,6 +60,8 @@ pi is installed as a devDependency so everything is self-contained.
 - Credential-bearing keys (`token`, `secret`, `api-key`, …) always win over public-identifier
   exclusions — never weaken the guard in `entropy.ts`.
 - Named provider rules take precedence over entropy findings in `scanner.ts` overlap resolution.
+- Every false-positive fix needs a sample in `fixtures/benign/` and a test showing the same shape
+  under a credential key is still detected.
 - Never log or persist actual redacted values except in opt-in `/secret-scanner debug on` mode.
 
 ## Install (as a pi package)

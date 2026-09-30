@@ -87,8 +87,26 @@ const SAFE_PATTERNS = [
 	/^[A-Za-z0-9._\-]+(?:\/[A-Za-z0-9._\-]+)+$/,
 ];
 
+const PATH_PATTERNS = [
+	/^\/(?:[A-Za-z0-9._\-]+\/)*[A-Za-z0-9._\-]*$/,
+	/^~\//,
+	/^\.\.?\//,
+	/^[A-Za-z0-9._\-]+(?:\/[A-Za-z0-9._\-]+)+$/,
+];
+
+// PATH-style lists and `from=to` path mappings, optionally behind a CLI flag,
+// e.g. the Nix-generated `-fmacro-prefix-map=/nix/store/<hash>-a=/nix/store/<hash>-b`.
+function isPathList(candidate: string): boolean {
+	const parts = candidate.split(/[=:]/).filter((part) => part.length > 0);
+	const flag = parts[0] ?? "";
+	if (parts.length > 1 && /^--?[A-Za-z][A-Za-z0-9-]*$/.test(flag) && !isCredentialKey(flag.replace(/^-+/, ""))) {
+		parts.shift();
+	}
+	return parts.length > 1 && parts.every((part) => PATH_PATTERNS.some((p) => p.test(part)));
+}
+
 function isSafe(candidate: string): boolean {
-	return SAFE_PATTERNS.some((p) => p.test(candidate));
+	return SAFE_PATTERNS.some((p) => p.test(candidate)) || isPathList(candidate);
 }
 
 // ── Contextual false-positive suppression ──────────────────────────────────────
@@ -147,6 +165,17 @@ const GIT_OID_CONTEXT_KEYS = new Set([
 const LOWER_HEX_40 = /^[0-9a-f]{40}$/;
 const LOWER_HEX_40_OR_64 = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const LOWER_HEX_64 = /^[0-9a-f]{64}$/;
+const NIX_STORE_NAME = /^[0-9a-df-np-sv-z]{32}(?:-[A-Za-z0-9+._?=-]+)?$/;
+const SRI_DIGEST = /^sha(1|256|384|512)-([A-Za-z0-9+/]+={0,2})$/;
+const SRI_DIGEST_BYTES: Record<string, number> = { "1": 20, "256": 32, "384": 48, "512": 64 };
+
+function isSriDigest(candidate: string): boolean {
+	const match = SRI_DIGEST.exec(candidate);
+	if (!match?.[1] || !match[2]) return false;
+	const bytes = SRI_DIGEST_BYTES[match[1]] ?? 0;
+	if (match[2].length !== Math.ceil(bytes / 3) * 4) return false;
+	return decodeCanonicalBase64(match[2])?.bytes.length === bytes;
+}
 
 const BASIC_AUTH_BEFORE = /\b(?:proxy-)?authorization\s*:\s*basic[ \t]+["']?$/i;
 const ASSIGNMENT_KEYS_BEFORE = /(?:^|[\s,;{[("'?&])([A-Za-z0-9_\-.]{1,40})["']?\s*[=:]\s*["']?/g;
@@ -221,10 +250,23 @@ function isCredentialKey(key: string): boolean {
 	return normalized.split("_").some((part) => CREDENTIAL_KEY_PARTS.has(part));
 }
 
+// Characters that end a value, so assignments before them belong to other
+// values (`"dist/token-util.js":{…},"integrity":"<v>"` or `a=1&token=x&b=<v>`).
+const VALUE_BOUNDARY = /[\n,;{}[\]()&]/g;
+
+/** The assignment chain that leads directly to the candidate (`token=sha256:`). */
+function assignmentChain(before: string): string {
+	let cut = -1;
+	VALUE_BOUNDARY.lastIndex = 0;
+	while (VALUE_BOUNDARY.exec(before) !== null) cut = VALUE_BOUNDARY.lastIndex - 1;
+	return before.slice(cut + 1);
+}
+
 function hasCredentialAssignment(before: string): boolean {
+	const chain = assignmentChain(before);
 	ASSIGNMENT_KEYS_BEFORE.lastIndex = 0;
 	let match: RegExpExecArray | null;
-	while ((match = ASSIGNMENT_KEYS_BEFORE.exec(before)) !== null) {
+	while ((match = ASSIGNMENT_KEYS_BEFORE.exec(chain)) !== null) {
 		if (match[1] && isCredentialKey(match[1])) return true;
 	}
 	return false;
@@ -255,11 +297,17 @@ function startsWithUrlScheme(before: string): boolean {
 
 function classifyOpaqueEntropy(text: string, start: number, bare = false): Pick<EntropyFinding, "action" | "context"> {
 	const before = text.slice(Math.max(0, start - 256), start);
+	// `keyBefore` may cross a newline (`secret:\n  <value>`), but other
+	// assignments only count in the candidate's own assignment chain: a
+	// `PASSWORD=` line must not turn every later value into a credential.
+	const lineBefore = assignmentChain(before);
 	const key = keyBefore(before);
-	const nestedCredential = /(?:^|[\s,;{[(]"?)([A-Za-z0-9_.-]{1,40})["']?\s*[=:]\s*sha(?:1|256):\s*$/i.exec(before);
+	const nestedCredential = /(?:^|[\s,;{[(]"?)([A-Za-z0-9_.-]{1,40})["']?\s*[=:]\s*sha(?:1|256):\s*$/i.exec(
+		lineBefore,
+	);
 	const credentialContext =
 		(key !== null && isCredentialKey(key)) ||
-		hasCredentialAssignment(before) ||
+		hasCredentialAssignment(lineBefore) ||
 		(nestedCredential?.[1] !== undefined && isCredentialKey(nestedCredential[1]));
 	const genericHexContext = key !== null && GENERIC_HEX_CONTEXT_KEYS.has(normalizeContextKey(key));
 	// Identifiers embedded in URL path segments are reported, not replaced:
@@ -329,15 +377,32 @@ function isContextuallySafe(candidate: string, text: string, start: number, end:
 	// Keep this below the credential guard so `token=sha512-...` remains detected.
 	// The second condition also suppresses structured sub-candidates extracted
 	// after `/` inside the base64 digest.
+	// Nix uses the same SRI form for `hash`/`narHash`; an exact digest length
+	// makes the shape specific enough to accept under any non-credential key.
+	if (isSriDigest(candidate)) return true;
 	if (/^sha(?:256|384|512)-[A-Za-z0-9+/]+={0,2}$/.test(candidate) && key === "integrity") return true;
 	if (/\bintegrity\s*[=:]\s*["']?sha(?:256|384|512)-[A-Za-z0-9+/=]*$/i.test(before)) return true;
+	if (/(?:^|[\s"'=:])sha(?:256|384|512)-[A-Za-z0-9+/]*$/.test(before) && /^[A-Za-z0-9+/]+={0,2}$/.test(candidate)) {
+		return true;
+	}
+
+	// A single host label right after a URL scheme (`https://docs-site.example`):
+	// the extractor reads `https:` as a key. Hostnames are not secrets, and
+	// credentials in the authority are covered by the named URL rule.
+	if (/^\/\/[A-Za-z0-9-]+$/.test(candidate) && /[A-Za-z][A-Za-z0-9+.-]*:$/.test(before) && text[end] === ".") {
+		return true;
+	}
+
+	// Nix store entries: `<32-char nix-base32 hash>-<name>` directly after a
+	// store directory. The Nix alphabet omits e, o, t, and u.
+	if (/\/$/.test(before) && NIX_STORE_NAME.test(candidate)) return true;
 
 	// Canonical lowercase Git object IDs under explicit public metadata keys.
 	if (key && isGitOidForKey(candidate, key)) return true;
 	if (LOWER_HEX_40_OR_64.test(candidate) && /\bcommit\s+$/.test(before)) return true;
 
 	// Docker/OCI digest syntax: `sha256:<64 lowercase hex>`.
-	if (LOWER_HEX_64.test(candidate) && /(?:^|[@:\s])sha256:\s*$/.test(before)) return true;
+	if (LOWER_HEX_64.test(candidate) && /(?:^|[@:\s"'=])sha256:\s*$/.test(before)) return true;
 
 	// Hex-named filesystem segments are content addresses (git object files,
 	// Docker overlay layers, content-addressed caches, temp dirs), not secrets.

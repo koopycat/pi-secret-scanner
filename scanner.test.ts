@@ -7,6 +7,10 @@
  * Run:  npx vitest run --config ../vitest.config.ts secret-scanner/scanner.test.ts
  */
 
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, it, expect } from "vitest";
 
 import { shannonEntropy, findHighEntropyStrings } from "./entropy.ts";
@@ -1114,5 +1118,54 @@ describe("countByType", () => {
 
 	it("multiple types", () => {
 		expect(countByType([f("X"), f("X"), f("Y")])).toEqual({ X: 2, Y: 1 });
+	});
+});
+
+// ── False-positive regression corpus ──────────────────────────────────────────
+
+describe("benign corpus", () => {
+	const corpusDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "benign");
+
+	for (const file of readdirSync(corpusDir)) {
+		it(`replaces nothing in ${file}`, () => {
+			const result = scanText(readFileSync(join(corpusDir, file), "utf-8"), { useEntropy: true });
+			expect(result.redactions.map((finding) => `${finding.type}: ${finding.value}`)).toEqual([]);
+		});
+	}
+});
+
+describe("false-positive fixes keep credential detection", () => {
+	const nixHash = "l9r346p3d25vs4g5" + "v37f3r3f28js97kb";
+
+	it("still redacts path-, Nix-, and SRI-shaped values under credential keys", () => {
+		const sri = "sha256-" + "GFWjsEND/vk4PRNpiyo1FneHG5TdZej1FCHQjqh3UGg=";
+		for (const text of [`token=${sri}`, `api_key: ${nixHash}-tool`, `secret=/nix/store/${nixHash}-tool`]) {
+			expect(scanText(text).redactions, text).not.toHaveLength(0);
+		}
+	});
+
+	it("still redacts a credential-flag path mapping", () => {
+		const opaque = ["Zx9wQp7/Vm4Kd2Rt8", "Yb6Nc1Hs5Jg3Lf0Eu"].join("");
+		const text = `run "--token=${opaque}"`;
+		expect(scanText(text).redactions).not.toHaveLength(0);
+	});
+
+	it("keeps credential context within one assignment chain but not across lines", () => {
+		const opaque = ["Zx9wQp7Vm4Kd2Rt8", "Yb6Nc1Hs5Jg3Lf0Eu"].join("");
+		expect(findHighEntropyStrings(`token=sha1:${gitSha40()}`)[0]?.action).toBe("redact");
+		const crossLine = findHighEntropyStrings(`PASSWORD=unrelated\nBUILD=${opaque}`);
+		expect(crossLine[0]).toMatchObject({ action: "report", context: "ambiguous" });
+	});
+
+	it("still detects URL credentials in the authority", () => {
+		const url = "https://" + "deploy:s3cr3tpass" + "@git.example.com/org/repo.git?ref=main";
+		expect(scanText(url).redactions[0]?.type).toBe("URL with Embedded Credentials");
+	});
+
+	it("still detects literal passwords that resemble code", () => {
+		for (const value of ["Hunter2[1]xyzabc", "correct.horse.battery-staple"]) {
+			const text = `password=${value}`;
+			expect(scanText(text, { useEntropy: false }).redactions, text).toHaveLength(1);
+		}
 	});
 });

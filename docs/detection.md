@@ -54,10 +54,15 @@ The scanner ignores narrowly recognized public identifiers in their expected con
 
 - lowercase 40-character SHA-1 Git object IDs by canonical shape, including bare command output, and lowercase 64-character SHA-256 Git object IDs in explicit Git metadata positions;
 - canonical Docker/OCI `sha256:<64 lowercase hex>` digests;
-- lowercase 64-character Docker image or container IDs under explicit ID labels; and
-- canonical `docker-desktop://dashboard/build/<builder>/<target>/<id>` links.
+- lowercase 64-character Docker image or container IDs under explicit ID labels;
+- canonical `docker-desktop://dashboard/build/<builder>/<target>/<id>` links;
+- Subresource Integrity digests (`sha1-`, `sha256-`, `sha384-`, `sha512-`) with the exact digest length, as used by npm lockfiles and Nix `hash`/`narHash` attributes;
+- Nix store entries (`<32-character Nix base32 hash>-<name>` after a store directory), PATH-style path lists, and `-flag=/path=/path` path mappings; and
+- a single host label directly after a URL scheme, such as `https://docs-site.example`.
 
 Canonical lowercase 40-character SHA-1 values are ignored even without Git-specific context because Git commands commonly print bare object IDs. Lowercase 64-character SHA-256 values require explicit Git context. Credential assignments such as `token=<40-hex>` and `secret=sha256:<64-hex>` always take precedence and remain detectable. Named credential rules are unaffected.
+
+Credential context comes from the value's own key or its assignment chain (`token=sha256:<value>`). Assignments earlier on the line that end at a value boundary (`,`, `;`, `&`, brackets) or on previous lines do not apply, so a `PASSWORD=` line no longer turns the values below it into credentials.
 
 ## Intentionally unmodified data
 
@@ -70,6 +75,15 @@ The provider-payload walker leaves these values unchanged:
 Opaque signatures are required for provider replay and can become invalid if modified. Image bytes are not text. Avoid placing credentials in these fields.
 
 ## Reducing false positives
+
+To find false positives, run the scanner over files that should contain no secrets:
+
+```bash
+pnpm fp-report ~/src/some-project        # counts and file names only
+pnpm fp-report ./ci-output --show-values # also prints truncated values
+```
+
+Every `replace` line in the output is a false positive worth a synthetic sample in `fixtures/benign/`; the test suite asserts that nothing in that directory is replaced.
 
 Use these controls in order:
 

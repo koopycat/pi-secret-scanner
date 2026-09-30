@@ -29,7 +29,8 @@
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"check": "prettier --check . && eslint . && tsc --noEmit && vitest --run",
-		"smoke": "node smoke/run.mjs"
+		"smoke": "node smoke/run.mjs",
+		"fp-report": "node scripts/fp-report.ts"
 	},
 	"dependencies": {
 		"smol-toml": "^1.7.0"

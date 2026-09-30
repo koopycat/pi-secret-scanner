@@ -17,9 +17,12 @@ export interface SecretPattern {
 	confidence: "high" | "medium";
 }
 
-const SOURCE_REFERENCE = /^[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*$/;
+// Member access includes TypeScript non-null access: `session!.token`.
+const SOURCE_REFERENCE = /^[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|!?\.)[A-Za-z_$][A-Za-z0-9_$]*)*!?$/;
+// Calls, nullish/logical operators, template interpolation, and computed
+// access with a non-literal index (`os.environ[`, `parser.tokens[len(`).
 const SOURCE_EXPRESSION_PREFIX =
-	/^(?:\\+)?(?:`)?[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*(?:\(|\?\?|&&|\|\||=\\?\$\{)/;
+	/^(?:\\+)?(?:`)?[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|!?\.)[A-Za-z_$][A-Za-z0-9_$]*)*(?:\(|\?\?|&&|\|\||=\\?\$\{|\[(?=$|[A-Za-z_$(]))/;
 const MASKED_SECRET = /^[A-Za-z0-9_-]*\*{4,}$/;
 
 export const SECRET_PATTERNS: SecretPattern[] = [
@@ -224,7 +227,10 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 	// ── URLs with embedded credentials ────────────────────────────────────────
 	{
 		name: "URL with Embedded Credentials",
-		regex: /[a-zA-Z][a-zA-Z0-9+\-.]*:\/\/[^@\s\\"'`]+:[^@\s\\"'`]{3,}@[^\s\\"'`]+/g,
+		// User info must sit in the authority, before the first `/`, `?`, or `#`;
+		// otherwise query strings such as `family=Inter:wght@400` look like
+		// `user:password@host`.
+		regex: /[a-zA-Z][a-zA-Z0-9+\-.]*:\/\/[^@\s\\"'`/?#]+:[^@\s\\"'`/?#]{3,}@[^\s\\"'`]+/g,
 		confidence: "high",
 	},
 ];

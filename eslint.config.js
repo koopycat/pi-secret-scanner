@@ -155,6 +155,15 @@ export default tseslint.config(
 		},
 	},
 
+	// ---- Dev scripts: CLI output is their purpose ----
+	{
+		files: ["scripts/**/*.ts"],
+		rules: {
+			"n/no-process-exit": "off",
+			"no-console": "off",
+		},
+	},
+
 	// ---- Prettier: disable all formatting rules (must be LAST) ----
 	prettierConfig,
 );

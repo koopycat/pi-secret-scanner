@@ -1,0 +1,11 @@
+# Python
+api_key = os.environ["OPENAI_API_KEY"]
+password = config.get("db_password")
+// TypeScript
+const token = session!.accessToken;
+const secret = opts?.clientSecret ?? process.env.CLIENT_SECRET;
+// Go
+token = parser.tokens[len(parser.tokens)-2]
+# Shell: a password line must not taint the lines below it
+DB_PASSWORD="$DB_PASSWORD_FROM_VAULT"
+EXCLUDES=(".git" "wp-content/themes/starter-theme/node_modules" "wp-content/plugins/timber/cache")
