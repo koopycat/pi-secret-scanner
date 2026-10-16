@@ -35,7 +35,7 @@
 		"smol-toml": "^1.7.0"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": ">=0.74.0"
+		"@earendil-works/pi-coding-agent": ">=0.99.2"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "^0.87.1",
