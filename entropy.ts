@@ -20,7 +20,7 @@ export type Base64Encoding = "base64" | "base64url";
 export type DecodedKind = "credential" | "text" | "binary" | "non-printable" | "invalid";
 
 export interface EntropyFinding {
-   	value: string;
+	value: string;
 	start: number;
 	end: number;
 	entropy: number;
