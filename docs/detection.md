@@ -25,6 +25,8 @@ Named regular-expression rules detect:
 - generic password, secret, token, and API-key assignments; and
 - URLs containing credentials.
 
+The GitLab personal access token rule matches `glpat-` followed by at least 20 letters, digits, underscores, or hyphens, redacting the entire run of token characters even for longer tokens.
+
 Named rules take precedence over overlapping entropy findings.
 
 ## Entropy detection

@@ -523,6 +523,23 @@ describe("scanText", () => {
 		expect(result.redacted).toBe('GitLab credential: "[REDACTED:GITLAB_PERSONAL_ACCESS_TOKEN]"');
 	});
 
+	it.each(["A", "z", "7", "_", "-", "Ab9_-".repeat(10)])(
+		"redacts the full GitLab PAT with extra token characters %s",
+		(suffix) => {
+			const key = gitlabPat() + suffix;
+			const result = scanText(`GitLab credential: "${key}".`, { useEntropy: false });
+			expect(result.findings).toEqual([
+				{
+					type: "GitLab Personal Access Token",
+					source: "regex",
+					value: key,
+					confidence: "high",
+				},
+			]);
+			expect(result.redacted).toBe('GitLab credential: "[REDACTED:GITLAB_PERSONAL_ACCESS_TOKEN]".');
+		},
+	);
+
 	it("does not corrupt text when provider-specific and generic matches overlap", () => {
 		const result = scanText(`token=${githubPat()}`, { useEntropy: false });
 		expect(result.redacted).toBe("token=[REDACTED:GITHUB_PERSONAL_ACCESS_TOKEN_(CLASSIC)]");

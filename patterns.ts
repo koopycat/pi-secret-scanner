@@ -71,7 +71,7 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 	// ── GitLab ────────────────────────────────────────────────────────────────
 	{
 		name: "GitLab Personal Access Token",
-		regex: /glpat-[A-Za-z0-9_-]{20}/g,
+		regex: /glpat-[A-Za-z0-9_-]{20,}/g,
 		confidence: "high",
 	},
 
