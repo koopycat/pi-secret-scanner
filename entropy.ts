@@ -573,7 +573,7 @@ export function shannonEntropy(s: string): number {
 	const len = s.length;
 	return Object.values(freq).reduce((sum, count) => {
 		const p = count / len;
-		return sum - p * Math.log2(p);
+		return sum - p * Math.log(p);
 	}, 0);
 }
 
