@@ -68,6 +68,13 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 		confidence: "high",
 	},
 
+	// ── GitLab ────────────────────────────────────────────────────────────────
+	{
+		name: "GitLab Personal Access Token",
+		regex: /glpat-[A-Za-z0-9_-]{20}/g,
+		confidence: "high",
+	},
+
 	// ── Google ────────────────────────────────────────────────────────────────
 	{
 		name: "Google API Key",

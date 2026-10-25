@@ -20,7 +20,7 @@ Only `read` and `bash` have immediate tool-result scanning. Text from other tool
 Named regular-expression rules detect:
 
 - private keys;
-- AWS, GitHub, Google, Stripe, Slack, Twilio, npm, Telegram, SendGrid, Mailchimp, Heroku, Databricks, OpenAI, and Anthropic credentials;
+- AWS, GitHub, GitLab, Google, Stripe, Slack, Twilio, npm, Telegram, SendGrid, Mailchimp, Heroku, Databricks, OpenAI, and Anthropic credentials;
 - JSON Web Tokens;
 - generic password, secret, token, and API-key assignments; and
 - URLs containing credentials.

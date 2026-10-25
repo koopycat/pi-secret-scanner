@@ -33,6 +33,10 @@ function githubPat(): string {
 	return "ghp_" + "abcdefghijklmnopqrstuvwxyz1234567890";
 }
 
+function gitlabPat(): string {
+	return "glpat-" + "AbCdEfGhIjKlMn01_2-3";
+}
+
 function stripeLiveKey(): string {
 	return "sk_live_" + "51ABCDEFGHIJKLMNOPQRSTUVWXYZab";
 }
@@ -419,6 +423,15 @@ describe("SECRET_PATTERNS", () => {
 		mustDetect("GitHub Personal Access Token (classic)", githubPat());
 	});
 
+	it("detects GitLab PAT with letters, digits, underscores, and hyphens", () => {
+		mustDetect("GitLab Personal Access Token", gitlabPat());
+	});
+
+	it("does not detect GitLab PAT near misses", () => {
+		mustNotDetect("GitLab Personal Access Token", `other-${gitlabPat().slice(6)}`);
+		mustNotDetect("GitLab Personal Access Token", gitlabPat().slice(0, -1));
+	});
+
 	it("detects Stripe Live key", () => {
 		mustDetect("Stripe Live Secret Key", stripeLiveKey());
 	});
@@ -494,6 +507,20 @@ describe("scanText", () => {
 		expect(result.findings[0]!.type).toBe("GitHub Personal Access Token (classic)");
 		expect(result.redacted).not.toContain(key);
 		expect(result.redacted).toContain("[REDACTED:");
+	});
+
+	it("detects and redacts a GitLab PAT without entropy detection", () => {
+		const key = gitlabPat();
+		const result = scanText(`GitLab credential: "${key}"`, { useEntropy: false });
+		expect(result.findings).toEqual([
+			{
+				type: "GitLab Personal Access Token",
+				source: "regex",
+				value: key,
+				confidence: "high",
+			},
+		]);
+		expect(result.redacted).toBe('GitLab credential: "[REDACTED:GITLAB_PERSONAL_ACCESS_TOKEN]"');
 	});
 
 	it("does not corrupt text when provider-specific and generic matches overlap", () => {
