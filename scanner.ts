@@ -59,6 +59,10 @@ export interface ScanOptions {
 	whitelist?: Set<string>;
 	/** Regex patterns -- if a secret value matches, it's skipped. */
 	whitelistRegexes?: RegExp[];
+	/** SHA-256 fingerprints of values to skip without retaining their plaintext. */
+	whitelistHashes?: Set<string>;
+	/** Convert a detected value to the representation used by whitelistHashes. */
+	hashWhitelistValue?: (value: string) => string;
 	/** Rule names to disable entirely (e.g. "Generic Password Assignment"). */
 	disabledRules?: Set<string>;
 	/** Skip scanning a string field in a structured payload. */
@@ -81,8 +85,15 @@ function placeholder(type: string): string {
 	return `[REDACTED:${type.toUpperCase().replace(/\s+/g, "_")}]`;
 }
 
-function isWhitelisted(value: string, whitelist?: Set<string>, regexes?: RegExp[]): boolean {
+function isWhitelisted(
+	value: string,
+	whitelist?: Set<string>,
+	regexes?: RegExp[],
+	hashes?: Set<string>,
+	hashValue?: (value: string) => string,
+): boolean {
 	if (whitelist?.has(value)) return true;
+	if (hashes && hashValue && hashes.has(hashValue(value))) return true;
 	if (regexes) {
 		for (const re of regexes) {
 			re.lastIndex = 0;
@@ -154,7 +165,16 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 			const end = start + value.length;
 
 			if (value.startsWith("[REDACTED:") || match[0].includes("[REDACTED:")) continue;
-			if (isWhitelisted(value, options?.whitelist, options?.whitelistRegexes)) continue;
+			if (
+				isWhitelisted(
+					value,
+					options?.whitelist,
+					options?.whitelistRegexes,
+					options?.whitelistHashes,
+					options?.hashWhitelistValue,
+				)
+			)
+				continue;
 
 			const finding: Finding = {
 				type: pattern.name,
@@ -170,7 +190,16 @@ export function scanText(text: string, options?: ScanOptions): ScanResult {
 	// Phase 2: Entropy detection (optional).
 	if (options?.useEntropy !== false) {
 		for (const ef of findHighEntropyStrings(text)) {
-			if (isWhitelisted(ef.value, options?.whitelist, options?.whitelistRegexes)) continue;
+			if (
+				isWhitelisted(
+					ef.value,
+					options?.whitelist,
+					options?.whitelistRegexes,
+					options?.whitelistHashes,
+					options?.hashWhitelistValue,
+				)
+			)
+				continue;
 			if (candidates.some((part) => ef.start < part.end && part.start < ef.end)) continue;
 
 			const finding: Finding = {
