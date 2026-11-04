@@ -20,10 +20,12 @@ Only `read` and `bash` have immediate tool-result scanning. Text from other tool
 Named regular-expression rules detect:
 
 - private keys;
-- AWS, GitHub, Google, Stripe, Slack, Twilio, npm, Telegram, SendGrid, Mailchimp, Heroku, Databricks, OpenAI, and Anthropic credentials;
+- AWS, GitHub, GitLab, Google, Stripe, Slack, Twilio, npm, Telegram, SendGrid, Mailchimp, Heroku, Databricks, OpenAI, and Anthropic credentials;
 - JSON Web Tokens;
 - generic password, secret, token, and API-key assignments; and
 - URLs containing credentials.
+
+The GitLab personal access token rule matches `glpat-` followed by at least 20 letters, digits, underscores, or hyphens, redacting the entire run of token characters even for longer tokens.
 
 Named rules take precedence over overlapping entropy findings.
 
